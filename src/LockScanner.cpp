@@ -778,6 +778,22 @@ ForceUnlockResult ForceUnlockHandles(const std::wstring& target) {
         return result;
     }
 
+    // Keep a known file handle open while taking the snapshot so the
+    // File ObjectTypeIndex can be identified reliably here too.
+    wchar_t modulePath[32768]{};
+    HANDLE fileTypeProbe = INVALID_HANDLE_VALUE;
+    const DWORD moduleLength = GetModuleFileNameW(
+        nullptr, modulePath, static_cast<DWORD>(_countof(modulePath)));
+    if (moduleLength != 0 && moduleLength < _countof(modulePath)) {
+        fileTypeProbe = CreateFileW(modulePath,
+                                    FILE_READ_ATTRIBUTES,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    nullptr,
+                                    OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL,
+                                    nullptr);
+    }
+
     ULONG size = 1u << 20;
     std::vector<BYTE> buffer(size);
     ULONG required = 0;
@@ -794,11 +810,20 @@ ForceUnlockResult ForceUnlockHandles(const std::wstring& target) {
         buffer.resize(size);
     }
     if (status < 0) {
+        if (fileTypeProbe != INVALID_HANDLE_VALUE) {
+            CloseHandle(fileTypeProbe);
+        }
         return result;
     }
 
     const auto* info = reinterpret_cast<const SYSTEM_HANDLE_INFORMATION_EX_LOCAL*>(buffer.data());
-    const USHORT fileObjectTypeIndex = DetectFileObjectTypeIndex(info);
+    const ULONG_PTR probeValue = fileTypeProbe != INVALID_HANDLE_VALUE
+        ? reinterpret_cast<ULONG_PTR>(fileTypeProbe)
+        : 0;
+    const USHORT fileObjectTypeIndex = DetectFileObjectTypeIndex(info, probeValue);
+    if (fileTypeProbe != INVALID_HANDLE_VALUE) {
+        CloseHandle(fileTypeProbe);
+    }
 
     std::unordered_map<DWORD, HANDLE> processHandles;
     std::unordered_set<DWORD> inaccessiblePids;
@@ -832,7 +857,8 @@ ForceUnlockResult ForceUnlockHandles(const std::wstring& target) {
         auto processIt = processHandles.find(pid);
         if (processIt == processHandles.end()) {
             process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid);
-            if (!process && GetLastError() == ERROR_ACCESS_DENIED) {
+            if (!process && GetLastError() == ERROR_ACCESS_DENIED &&
+                fileObjectTypeIndex != 0) {
                 inaccessiblePids.insert(pid);
             }
             processHandles.emplace(pid, process);
