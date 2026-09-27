@@ -24,6 +24,8 @@ struct ScanResult {
     DWORD inaccessibleProcessCount{};
     DWORD inspectedDiskHandleCount{};
     bool handleTypeFilterAvailable{};
+    bool deleteShareProbeSucceeded{};
+    DWORD deleteShareProbeError{};
     std::vector<LockProcess> processes;
 };
 
