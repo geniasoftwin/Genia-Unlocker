@@ -23,6 +23,7 @@ struct ScanResult {
     DWORD restartManagerError{};
     DWORD inaccessibleProcessCount{};
     DWORD inspectedDiskHandleCount{};
+    bool handleTypeFilterAvailable{};
     std::vector<LockProcess> processes;
 };
 
