@@ -1745,11 +1745,25 @@ void RetryScan(AppState* state) {
         return;
     }
 
-    if (state->lastInaccessibleProcessCount != 0 && !IsRunningElevated()) {
+    const bool unidentifiedSharingLock =
+        state->locks.empty() &&
+        state->lastDeleteShareProbeError == ERROR_SHARING_VIOLATION;
+    if ((state->lastInaccessibleProcessCount != 0 || unidentifiedSharingLock) &&
+        !IsRunningElevated()) {
+        std::wstring prompt;
+        if (unidentifiedSharingLock) {
+            prompt =
+                L"Windows confirms that this target is blocked by file sharing, "
+                L"but the owning process was not identified with current permissions.\n\n"
+                L"Restart Genia Unlocker as administrator and rescan this target?";
+        } else {
+            prompt =
+                L"Some processes that own file handles could not be inspected with current permissions.\n\n"
+                L"Restart Genia Unlocker as administrator and rescan this target?";
+        }
         const int answer = MessageBoxW(
             state->hwnd,
-            L"Some processes that own file handles could not be inspected with current permissions.\n\n"
-            L"Restart Genia Unlocker as administrator and rescan this target?",
+            prompt.c_str(),
             L"Scan as administrator",
             MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON1);
         if (answer == IDYES) {
