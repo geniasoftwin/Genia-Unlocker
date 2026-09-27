@@ -1,0 +1,13 @@
+.vs/
+.vsbuild/
+bin/
+dist/*
+!dist/.gitkeep
+release/*
+!release/.gitkeep
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.aps
+*.log
