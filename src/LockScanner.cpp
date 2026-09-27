@@ -112,6 +112,30 @@ HANDLE OpenTargetForMetadata(const std::wstring& target, bool isDirectory) {
                        nullptr);
 }
 
+void ProbeDeleteSharing(const std::wstring& target,
+                        bool isDirectory,
+                        bool& succeeded,
+                        DWORD& error) {
+    succeeded = false;
+    error = ERROR_SUCCESS;
+
+    const DWORD flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
+    HANDLE probe = CreateFileW(target.c_str(),
+                               DELETE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr,
+                               OPEN_EXISTING,
+                               flags,
+                               nullptr);
+    if (probe == INVALID_HANDLE_VALUE) {
+        error = GetLastError();
+        return;
+    }
+
+    succeeded = true;
+    CloseHandle(probe);
+}
+
 std::wstring ToLower(std::wstring value) {
     std::transform(value.begin(), value.end(), value.begin(), [](wchar_t c) {
         return static_cast<wchar_t>(std::towlower(c));
@@ -883,6 +907,11 @@ ScanResult ScanLocks(const std::wstring& target) {
     if (!result.targetExists) {
         return result;
     }
+
+    ProbeDeleteSharing(target,
+                       result.targetIsDirectory,
+                       result.deleteShareProbeSucceeded,
+                       result.deleteShareProbeError);
 
     std::unordered_map<DWORD, LockProcess> processMap;
     result.restartManagerError = ScanRestartManager(target, processMap);
