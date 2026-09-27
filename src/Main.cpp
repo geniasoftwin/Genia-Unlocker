@@ -552,65 +552,328 @@ void OpenExternalUrl(HWND owner, const wchar_t* url) {
     }
 }
 
+struct AboutState {
+    AppState* app{};
+    HWND closeButton{};
+    HWND githubButton{};
+    HWND issueButton{};
+    HWND copyButton{};
+    HFONT font{};
+    HFONT titleFont{};
+    HFONT versionFont{};
+};
+
+std::wstring BuildVersionInfoText() {
+    return L"Genia Unlocker " + std::wstring(kAppVersionDisplay) +
+           L"\r\nAuthor: GeniaSoftWin"
+           L"\r\nLicense: MIT"
+           L"\r\nPlatform: Windows x64 · Native Win32 C++"
+           L"\r\nSource: " + std::wstring(kRepositoryUrl);
+}
+
+LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* about = reinterpret_cast<AboutState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        about = reinterpret_cast<AboutState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(about));
+    }
+
+    AppState* app = about ? about->app : nullptr;
+    switch (msg) {
+    case WM_CREATE: {
+        if (!about || !app) return -1;
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+        about->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+        about->titleFont = CreateModernFont(dpi, 16, FW_SEMIBOLD, L"Segoe UI Variable Display");
+        about->versionFont = CreateModernFont(dpi, 9, FW_SEMIBOLD, L"Segoe UI Variable Text");
+
+        about->closeButton = CreateWindowW(
+            L"BUTTON", L"×",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(408), sc(5), sc(24), sc(22), hwnd,
+            ControlId(IDC_ABOUT_CLOSE), nullptr, nullptr);
+        about->githubButton = CreateWindowW(
+            L"BUTTON", L"GitHub",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(16), sc(248), sc(72), sc(28), hwnd,
+            ControlId(IDC_ABOUT_GITHUB), nullptr, nullptr);
+        about->issueButton = CreateWindowW(
+            L"BUTTON", L"Report issue",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(96), sc(248), sc(92), sc(28), hwnd,
+            ControlId(IDC_ABOUT_ISSUE), nullptr, nullptr);
+        about->copyButton = CreateWindowW(
+            L"BUTTON", L"Copy info",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(196), sc(248), sc(86), sc(28), hwnd,
+            ControlId(IDC_ABOUT_COPY), nullptr, nullptr);
+        HWND close = CreateWindowW(
+            L"BUTTON", L"Close",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(350), sc(248), sc(74), sc(28), hwnd,
+            ControlId(IDCANCEL), nullptr, nullptr);
+
+        for (HWND button : {about->closeButton, about->githubButton,
+                            about->issueButton, about->copyButton, close}) {
+            SetFont(button, about->font);
+            ModernTheme::ApplyControlTheme(button, app->palette.dark);
+        }
+        ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
+        return 0;
+    }
+
+    case WM_ERASEBKGND:
+        if (app && app->windowBrush) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(reinterpret_cast<HDC>(wParam), &rc, app->windowBrush);
+            return 1;
+        }
+        break;
+
+    case WM_PAINT:
+        if (about && app) {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            SetBkMode(dc, TRANSPARENT);
+
+            RECT captionRc{sc(10), sc(3), rc.right - sc(48), sc(29)};
+            SetTextColor(dc, app->palette.text);
+            HGDIOBJ oldFont = about->font ? SelectObject(dc, about->font) : nullptr;
+            DrawTextW(dc, L"About Genia Unlocker", -1, &captionRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            if (app->icon) {
+                DrawIconEx(dc, sc(18), sc(48), app->icon, sc(42), sc(42),
+                           0, nullptr, DI_NORMAL);
+            }
+
+            RECT titleRc{sc(74), sc(46), rc.right - sc(18), sc(73)};
+            oldFont = about->titleFont ? SelectObject(dc, about->titleFont) : nullptr;
+            SetTextColor(dc, app->palette.text);
+            DrawTextW(dc, L"Genia Unlocker", -1, &titleRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            RECT versionRc{sc(74), sc(72), rc.right - sc(18), sc(94)};
+            oldFont = about->versionFont ? SelectObject(dc, about->versionFont) : nullptr;
+            SetTextColor(dc, app->palette.accent);
+            std::wstring version = L"v" + std::wstring(kAppVersionDisplay);
+            DrawTextW(dc, version.c_str(), -1, &versionRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            oldFont = about->font ? SelectObject(dc, about->font) : nullptr;
+            SetTextColor(dc, app->palette.text);
+
+            RECT descriptionRc{sc(18), sc(105), rc.right - sc(18), sc(129)};
+            DrawTextW(dc, L"Lightweight native Windows file/folder unlocker.",
+                      -1, &descriptionRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            RECT metaRc{sc(18), sc(136), rc.right - sc(18), sc(199)};
+            const wchar_t* meta =
+                L"Author: GeniaSoftWin\r\n"
+                L"License: MIT\r\n"
+                L"Platform: Windows x64 · Native Win32 C++";
+            DrawTextW(dc, meta, -1, &metaRc, DT_LEFT | DT_TOP);
+
+            SetTextColor(dc, app->palette.muted);
+            RECT sourceRc{sc(18), sc(203), rc.right - sc(18), sc(224)};
+            DrawTextW(dc, L"Source: github.com/geniasoftwin/Genia-Unlocker",
+                      -1, &sourceRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            RECT copyrightRc{sc(18), sc(224), rc.right - sc(18), sc(242)};
+            DrawTextW(dc, L"Copyright © 2026 GeniaSoftWin",
+                      -1, &copyrightRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            if (oldFont) SelectObject(dc, oldFont);
+
+            HPEN pen = CreatePen(PS_SOLID, 1, app->palette.border);
+            HGDIOBJ oldPen = SelectObject(dc, pen);
+            MoveToEx(dc, sc(16), sc(241), nullptr);
+            LineTo(dc, rc.right - sc(16), sc(241));
+            SelectObject(dc, oldPen);
+            DeleteObject(pen);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        break;
+
+    case WM_DRAWITEM:
+        if (app) {
+            const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (draw && draw->CtlType == ODT_BUTTON) {
+                ModernTheme::ButtonKind kind =
+                    draw->CtlID == IDC_ABOUT_GITHUB
+                        ? ModernTheme::ButtonKind::Primary
+                        : ModernTheme::ButtonKind::Secondary;
+                ModernTheme::DrawButton(*draw, app->palette, kind);
+                return TRUE;
+            }
+        }
+        break;
+
+    case WM_CTLCOLORBTN:
+        if (app) {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+            return reinterpret_cast<LRESULT>(app->windowBrush);
+        }
+        break;
+
+    case WM_COMMAND:
+        if (!about || !app) break;
+        switch (LOWORD(wParam)) {
+        case IDC_ABOUT_CLOSE:
+        case IDCANCEL:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        case IDC_ABOUT_GITHUB:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                OpenExternalUrl(hwnd, kRepositoryUrl);
+            }
+            return 0;
+        case IDC_ABOUT_ISSUE:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                OpenExternalUrl(hwnd, kIssuesUrl);
+            }
+            return 0;
+        case IDC_ABOUT_COPY:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                if (CopyTextToClipboard(hwnd, BuildVersionInfoText())) {
+                    SetWindowTextW(about->copyButton, L"Copied");
+                    InvalidateRect(about->copyButton, nullptr, TRUE);
+                } else {
+                    MessageBoxW(hwnd, L"Could not copy version information.",
+                                kWindowTitle, MB_ICONERROR);
+                }
+            }
+            return 0;
+        }
+        break;
+
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        if (app) {
+            ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+
+    case WM_NCHITTEST: {
+        POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (about && about->closeButton) {
+            RECT closeRc{};
+            GetWindowRect(about->closeButton, &closeRc);
+            if (PtInRect(&closeRc, pt)) {
+                return HTCLIENT;
+            }
+        }
+        RECT windowRc{};
+        GetWindowRect(hwnd, &windowRc);
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        const int captionHeight = MulDiv(32, dpi, 96);
+        if (pt.y >= windowRc.top && pt.y < windowRc.top + captionHeight) {
+            return HTCAPTION;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        if (app && app->aboutWindow == hwnd) {
+            app->aboutWindow = nullptr;
+        }
+        if (about) {
+            if (about->font) DeleteObject(about->font);
+            if (about->titleFont) DeleteObject(about->titleFont);
+            if (about->versionFont) DeleteObject(about->versionFont);
+        }
+        delete about;
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 void ShowAboutDialog(AppState* state) {
-    if (!state) return;
+    if (!state || !state->hwnd) return;
 
-    TASKDIALOG_BUTTON buttons[] = {
-        { 6001, L"GitHub" },
-        { 6002, L"Report issue" },
-        { 6003, L"Copy version info" },
-        { IDCANCEL, L"Close" }
-    };
-
-    std::wstring content =
-        L"Lightweight native Windows file/folder unlocker.\n\n"
-        L"Version: " + std::wstring(kAppVersionDisplay) +
-        L"\nAuthor: GeniaSoftWin"
-        L"\nLicense: MIT"
-        L"\nPlatform: Windows x64 · Native Win32 C++"
-        L"\n\nSource: github.com/geniasoftwin/Genia-Unlocker"
-        L"\n\nCopyright © 2026 GeniaSoftWin";
-
-    TASKDIALOGCONFIG config{};
-    config.cbSize = sizeof(config);
-    config.hwndParent = state->hwnd;
-    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION |
-                     TDF_POSITION_RELATIVE_TO_WINDOW |
-                     TDF_SIZE_TO_CONTENT |
-                     TDF_USE_HICON_MAIN;
-    config.pszWindowTitle = L"About Genia Unlocker";
-    config.pszMainInstruction = L"Genia Unlocker";
-    config.pszContent = content.c_str();
-    config.cButtons = static_cast<UINT>(_countof(buttons));
-    config.pButtons = buttons;
-    config.nDefaultButton = IDCANCEL;
-    config.hMainIcon = state->icon;
-
-    int button = IDCANCEL;
-    HRESULT hr = TaskDialogIndirect(&config, &button, nullptr, nullptr);
-    if (FAILED(hr)) {
-        std::wstring fallback =
-            L"Genia Unlocker\nVersion " + std::wstring(kAppVersionDisplay) +
-            L"\n\nAuthor: GeniaSoftWin\nLicense: MIT"
-            L"\nSource: github.com/geniasoftwin/Genia-Unlocker";
-        MessageBoxW(state->hwnd, fallback.c_str(), L"About Genia Unlocker", MB_ICONINFORMATION);
+    if (state->aboutWindow && IsWindow(state->aboutWindow)) {
+        ShowWindow(state->aboutWindow, SW_RESTORE);
+        SetForegroundWindow(state->aboutWindow);
         return;
     }
 
-    if (button == 6001) {
-        OpenExternalUrl(state->hwnd, kRepositoryUrl);
-    } else if (button == 6002) {
-        OpenExternalUrl(state->hwnd, kIssuesUrl);
-    } else if (button == 6003) {
-        std::wstring info =
-            L"Genia Unlocker " + std::wstring(kAppVersionDisplay) +
-            L"\r\nAuthor: GeniaSoftWin"
-            L"\r\nLicense: MIT"
-            L"\r\nSource: " + std::wstring(kRepositoryUrl);
-        if (!CopyTextToClipboard(state->hwnd, info)) {
-            MessageBoxW(state->hwnd, L"Could not copy version information.", kWindowTitle, MB_ICONERROR);
+    HINSTANCE instance = reinterpret_cast<HINSTANCE>(
+        GetWindowLongPtrW(state->hwnd, GWLP_HINSTANCE));
+    static bool classReady = false;
+    if (!classReady) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = AboutWindowProc;
+        wc.hInstance = instance;
+        wc.hIcon = state->icon;
+        wc.hIconSm = state->icon;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = kAboutWindowClass;
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            MessageBoxW(state->hwnd, L"Could not create the About window.",
+                        kWindowTitle, MB_ICONERROR);
+            return;
         }
+        classReady = true;
     }
+
+    const int dpi = GetDpiForWindow(state->hwnd) > 0 ? GetDpiForWindow(state->hwnd) : 96;
+    const int width = MulDiv(440, dpi, 96);
+    const int height = MulDiv(288, dpi, 96);
+
+    HWND centerOwner =
+        state->settingsWindow && IsWindowVisible(state->settingsWindow)
+            ? state->settingsWindow
+            : state->hwnd;
+    RECT owner{};
+    GetWindowRect(centerOwner, &owner);
+    const int x = owner.left + ((owner.right - owner.left) - width) / 2;
+    const int y = owner.top + ((owner.bottom - owner.top) - height) / 2;
+
+    auto* about = new AboutState{};
+    about->app = state;
+    HWND window = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        kAboutWindowClass,
+        L"About Genia Unlocker",
+        WS_POPUP | WS_BORDER,
+        x, y, width, height,
+        centerOwner, nullptr, instance, about);
+    if (!window) {
+        delete about;
+        MessageBoxW(state->hwnd, L"Could not open About.",
+                    kWindowTitle, MB_ICONERROR);
+        return;
+    }
+
+    state->aboutWindow = window;
+    ShowWindow(window, SW_SHOWNORMAL);
+    UpdateWindow(window);
 }
 
 void PopulateList(AppState* state) {
