@@ -3,8 +3,8 @@
 
 IDI_APP_ICON ICON "GeniaUnlocker.ico"
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,5,0,1
- PRODUCTVERSION 0,5,0,1
+ FILEVERSION 0,5,0,2
+ PRODUCTVERSION 0,5,0,2
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS VS_FF_DEBUG
@@ -21,12 +21,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "GeniaSoftWin\0"
             VALUE "FileDescription", "Genia Unlocker\0"
-            VALUE "FileVersion", "0.5.0.1\0"
+            VALUE "FileVersion", "0.5.0.2\0"
             VALUE "InternalName", "GeniaUnlocker\0"
             VALUE "OriginalFilename", "GeniaUnlocker.exe\0"
             VALUE "ProductName", "Genia Unlocker\0"
             VALUE "LegalCopyright", "Copyright © 2026 GeniaSoftWin\0"
-            VALUE "ProductVersion", "0.5.0 Preview 1\0"
+            VALUE "ProductVersion", "0.5.0 Preview 2\0"
         END
     END
     BLOCK "VarFileInfo"
