@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files"><UniqueIdentifier>{C13D6B9A-456B-4AE0-BD08-D9666BEA21F0}</UniqueIdentifier></Filter>
+    <Filter Include="Header Files"><UniqueIdentifier>{F20B8D13-1291-4FE8-90E8-7EB56CA58E48}</UniqueIdentifier></Filter>
+    <Filter Include="Resource Files"><UniqueIdentifier>{CC79D45D-D40F-499A-96F8-D9271683F1CB}</UniqueIdentifier></Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\Main.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\LockScanner.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\WindowsIntegration.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\ModernTheme.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\LockScanner.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\WindowsIntegration.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\ModernTheme.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\resource.h"><Filter>Header Files</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="res\GeniaUnlocker.rc"><Filter>Resource Files</Filter></ResourceCompile>
+    <None Include="res\GeniaUnlocker.ico"><Filter>Resource Files</Filter></None>
+    <None Include="res\GeniaUnlocker.manifest"><Filter>Resource Files</Filter></None>
+  </ItemGroup>
+</Project>
