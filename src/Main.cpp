@@ -497,8 +497,7 @@ bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
     }
     EmptyClipboard();
     const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (!memory) {
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);    if (!memory) {
         CloseClipboard();
         return false;
     }
@@ -997,4 +996,1471 @@ bool DeleteTargetWithShell(const std::wstring& target,
 
     IFileOperation* operation = nullptr;
     HRESULT hr = CoCreateInstance(
-        CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&operation));
+        CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&operation));    if (FAILED(hr) || !operation) {
+        errorText = L"Cannot initialize the Windows file operation service: " + FormatHResult(hr);
+        return false;
+    }
+
+    DWORD flags = FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT;
+    if (!permanent) {
+        flags |= FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE;
+    }
+    hr = operation->SetOperationFlags(flags);
+    if (FAILED(hr)) {
+        operation->Release();
+        errorText = L"Cannot configure the delete operation: " + FormatHResult(hr);
+        return false;
+    }
+
+    IShellItem* item = nullptr;
+    hr = SHCreateItemFromParsingName(target.c_str(), nullptr, IID_PPV_ARGS(&item));
+    if (FAILED(hr) || !item) {
+        operation->Release();
+        errorText = L"Cannot open the selected item for deletion: " + FormatHResult(hr);
+        return false;
+    }
+
+    hr = operation->DeleteItem(item, nullptr);
+    item->Release();
+    if (FAILED(hr)) {
+        operation->Release();
+        errorText = L"Windows rejected the delete request: " + FormatHResult(hr);
+        return false;
+    }
+
+    hr = operation->PerformOperations();
+    BOOL aborted = FALSE;
+    operation->GetAnyOperationsAborted(&aborted);
+    operation->Release();
+
+    if (FAILED(hr)) {
+        errorText = L"Delete failed: " + FormatHResult(hr);
+        return false;
+    }
+    if (aborted) {
+        errorText = L"The delete operation was aborted.";
+        return false;
+    }
+
+    const DWORD verifyAttributes = GetFileAttributesW(target.c_str());
+    if (verifyAttributes != INVALID_FILE_ATTRIBUTES) {
+        errorText = L"The item still exists after Windows completed the delete operation.";
+        return false;
+    }
+
+    const DWORD verifyError = GetLastError();
+    if (verifyError != ERROR_FILE_NOT_FOUND && verifyError != ERROR_PATH_NOT_FOUND) {
+        errorText = L"Windows reported deletion, but Genia Unlocker could not verify that the item is gone: " +
+                    ErrorMessage(verifyError);
+        return false;
+    }
+    return true;
+}
+
+bool IsVolumeRootTarget(const std::wstring& target) {
+    if (target.empty()) {
+        return false;
+    }
+
+    wchar_t volumeRoot[32768]{};
+    if (!GetVolumePathNameW(target.c_str(), volumeRoot, static_cast<DWORD>(_countof(volumeRoot)))) {
+        return false;
+    }
+
+    auto normalize = [](std::wstring value) {
+        std::replace(value.begin(), value.end(), L'/', L'\\');
+        while (value.size() > 1 && value.back() == L'\\') {
+            value.pop_back();
+        }
+        std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
+        });
+        return value;
+    };
+
+    return normalize(target) == normalize(volumeRoot);
+}
+
+bool ConfirmDelete(AppState* state, const wchar_t* title) {
+    if (!state || state->target.empty()) {
+        return false;
+    }
+
+    DWORD attrs = GetFileAttributesW(state->target.c_str());
+    const bool isDirectory = state->lastTargetExists
+        ? state->lastTargetIsDirectory
+        : (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
+
+    if (isDirectory && IsVolumeRootTarget(state->target)) {
+        MessageBoxW(state->hwnd,
+                    L"Deleting a drive or volume root is intentionally disabled.",
+                    kWindowTitle,
+                    MB_ICONINFORMATION);
+        return false;
+    }
+
+    std::wstring prompt;
+    if (state->permanentDeleteDefault) {
+        prompt = isDirectory
+            ? L"Permanently delete this folder and everything inside it?\n\n"
+            : L"Permanently delete this file?\n\n";
+        prompt += state->target;
+        prompt += L"\n\nThis action cannot be undone.";
+    } else {
+        prompt = isDirectory
+            ? L"Move this folder and everything inside it to the Recycle Bin?\n\n"
+            : L"Move this file to the Recycle Bin?\n\n";
+        prompt += state->target;
+        prompt += L"\n\nYou can change the default delete mode in Settings.";
+    }
+
+    return MessageBoxW(state->hwnd,
+                       prompt.c_str(),
+                       title,
+                       MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+}
+
+bool ScheduleDeleteOnRebootRecursive(const std::wstring& path, std::wstring& errorText) {
+    DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        return true;
+    }
+
+    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+        std::wstring pattern = path;
+        if (!pattern.empty() && pattern.back() != L'\\') {
+            pattern.push_back(L'\\');
+        }
+        pattern += L"*";
+
+        WIN32_FIND_DATAW data{};
+        HANDLE find = FindFirstFileW(pattern.c_str(), &data);
+        if (find == INVALID_HANDLE_VALUE) {
+            const DWORD findError = GetLastError();
+            if (findError != ERROR_FILE_NOT_FOUND && findError != ERROR_PATH_NOT_FOUND) {
+                errorText = L"Could not enumerate the folder for delete-on-reboot: " +
+                            ErrorMessage(findError);
+                return false;
+            }
+        } else {
+            do {
+                if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) {
+                    continue;
+                }
+                std::wstring child = path;
+                if (!child.empty() && child.back() != L'\\') {
+                    child.push_back(L'\\');
+                }
+                child += data.cFileName;
+                if (!ScheduleDeleteOnRebootRecursive(child, errorText)) {
+                    FindClose(find);
+                    return false;
+                }
+            } while (FindNextFileW(find, &data));
+            FindClose(find);
+        }
+    }
+
+    if (!MoveFileExW(path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT)) {
+        const DWORD error = GetLastError();
+        errorText = L"Could not schedule deletion at reboot: " + ErrorMessage(error);
+        return false;
+    }
+    return true;
+}
+
+bool OfferDeleteOnReboot(AppState* state) {
+    if (!state || state->target.empty() || IsVolumeRootTarget(state->target)) {
+        return false;
+    }
+    const int answer = MessageBoxW(
+        state->hwnd,
+        L"Windows could not delete the item now.\n\n"
+        L"Schedule it for permanent deletion at the next Windows startup?\n\n"
+        L"This fallback does not use the Recycle Bin and cannot be undone after restart.",
+        L"Delete on reboot",
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (answer != IDYES) {
+        return false;
+    }
+
+    std::wstring error;
+    if (!ScheduleDeleteOnRebootRecursive(state->target, error)) {
+        if (!error.empty()) {
+            MessageBoxW(state->hwnd, error.c_str(), L"Delete on reboot", MB_ICONERROR);
+        }
+        return false;
+    }
+    SetStatus(state, L"Scheduled for permanent deletion at the next Windows startup.");
+    return true;
+}
+
+bool TryDeleteCurrentTarget(AppState* state, const std::wstring& successText) {
+    if (!state || state->target.empty()) {
+        return false;
+    }
+
+    SetStatus(state, state->permanentDeleteDefault
+        ? L"Permanently deleting the selected item..."
+        : L"Moving the selected item to the Recycle Bin...");
+    std::wstring error;
+    if (DeleteTargetWithShell(state->target, state->permanentDeleteDefault, error)) {
+        state->lastTargetExists = false;
+        state->lastTargetIsDirectory = false;
+        state->lastInaccessibleProcessCount = 0;
+        state->locks.clear();
+        PopulateList(state);
+        SetStatus(state, successText);
+        UpdateActionButtons(state);
+        return true;
+    }
+
+    if (!error.empty()) {
+        MessageBoxW(state->hwnd, error.c_str(), L"Delete failed", MB_ICONERROR);
+    }
+    if (OfferDeleteOnReboot(state)) {
+        return false;
+    }
+    SetStatus(state, L"Delete failed. Rescanning to identify what is still blocking the item...");
+    state->pendingAction = PendingAction::None;
+    StartScan(state);
+    return false;
+}
+
+std::wstring BuildBlockingProcessPrompt(const AppState* state) {
+    std::wstring prompt =
+        L"The graceful unlock request did not release the item.\n\n"
+        L"Blocking processes:\n";
+
+    const size_t limit = (std::min)(state->locks.size(), static_cast<size_t>(6));
+    for (size_t i = 0; i < limit; ++i) {
+        const auto& process = state->locks[i];
+        prompt += L"  • " + process.name + L" (PID " + std::to_wstring(process.pid) + L")\n";
+    }
+    if (state->locks.size() > limit) {
+        prompt += L"  • and " + std::to_wstring(state->locks.size() - limit) + L" more\n";
+    }
+
+    prompt += state->permanentDeleteDefault
+        ? L"\nTerminate the detected blocking processes and continue with permanent deletion?\n\n"
+          L"Unsaved data in those processes can be lost."
+        : L"\nTerminate the detected blocking processes and continue by moving the item to the Recycle Bin?\n\n"
+          L"Unsaved data in those processes can be lost.";
+    return prompt;
+}
+
+bool TerminateDetectedForDelete(AppState* state, std::wstring& errorText) {
+    errorText.clear();
+    std::vector<DWORD> needElevation;
+
+    for (const auto& process : state->locks) {
+        std::wstring unsafeReason;
+        if (IsUnsafeSystemProcess(process.pid, unsafeReason)) {
+            errorText = L"Genia Unlocker refuses to terminate " + process.name +
+                        L" (PID " + std::to_wstring(process.pid) + L"): " + unsafeReason + L".";
+            return false;
+        }
+
+        DWORD error = ERROR_SUCCESS;
+        if (TerminateProcessByPid(process.pid, error)) {
+            continue;
+        }
+
+        // A process can disappear between the scan and the termination pass.
+        if (error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_FOUND) {
+            continue;
+        }
+
+        if (error == ERROR_ACCESS_DENIED && !IsRunningElevated()) {
+            needElevation.push_back(process.pid);
+            continue;
+        }
+
+        errorText = L"Cannot terminate " + process.name + L" (PID " +
+                    std::to_wstring(process.pid) + L"): " + ErrorMessage(error);
+        return false;
+    }
+
+    if (!needElevation.empty()) {
+        DWORD helperExitCode = ERROR_GEN_FAILURE;
+        if (!RunElevatedKillListHelper(needElevation, helperExitCode, errorText)) {
+            if (errorText.empty()) {
+                errorText = L"Administrator-assisted termination failed: " +
+                            ErrorMessage(helperExitCode);
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool StartTerminateThenDelete(AppState* state) {
+    const std::wstring prompt = BuildBlockingProcessPrompt(state);
+    if (MessageBoxW(state->hwnd,
+                    prompt.c_str(),
+                    L"Unlock & Delete",
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        state->pendingAction = PendingAction::None;
+        SetStatus(state, L"Deletion cancelled. The item is still locked.");
+        return false;
+    }
+
+    std::wstring error;
+    if (!TerminateDetectedForDelete(state, error)) {
+        state->pendingAction = PendingAction::None;
+        if (!error.empty()) {
+            MessageBoxW(state->hwnd, error.c_str(), L"Unlock & Delete", MB_ICONERROR);
+        }
+        SetStatus(state, L"Could not terminate all blocking processes. The item was not deleted.");
+        return false;
+    }
+
+    SetStatus(state, L"Blocking processes terminated. Verifying the item before deletion...");
+    state->pendingAction = PendingAction::UnlockDeleteAfterTerminate;
+    Sleep(300);
+    StartScan(state);
+    return true;
+}
+
+void DeleteOnly(AppState* state) {
+    if (!state || state->target.empty() || !state->lastTargetExists) {
+        return;
+    }
+    if (!ConfirmDelete(state, L"Delete")) {
+        return;
+    }
+    TryDeleteCurrentTarget(state, state->permanentDeleteDefault
+        ? L"Permanently deleted successfully."
+        : L"Moved to the Recycle Bin successfully.");
+}
+
+std::wstring FormatForceUnlockResult(const ForceUnlockResult& result) {
+    std::wstring text = L"Force Unlock closed " + std::to_wstring(result.handlesClosed) +
+        (result.handlesClosed == 1 ? L" matching file handle" : L" matching file handles") +
+        L" in " + std::to_wstring(result.processesAffected) +
+        (result.processesAffected == 1 ? L" process." : L" processes.");
+    if (result.failedHandleCount != 0) {
+        text += L" " + std::to_wstring(result.failedHandleCount) + L" matching handles could not be closed.";
+    }
+    if (result.inaccessibleProcessCount != 0) {
+        text += L" " + std::to_wstring(result.inaccessibleProcessCount) +
+            L" file-handle owners require higher permissions.";
+    }
+    if (result.skippedProtectedProcessCount != 0) {
+        text += L" " + std::to_wstring(result.skippedProtectedProcessCount) +
+            L" critical Windows processes were intentionally skipped.";
+    }
+    return text;
+}
+
+bool ExecuteForceUnlock(AppState* state, bool allowElevation, std::wstring& details) {
+    details.clear();
+    if (!state || state->target.empty()) {
+        return false;
+    }
+
+    ForceUnlockResult result = ForceUnlockHandles(state->target);
+    details = FormatForceUnlockResult(result);
+
+    if (result.inaccessibleProcessCount != 0 && !IsRunningElevated() && allowElevation) {
+        const int answer = MessageBoxW(
+            state->hwnd,
+            L"Some matching file-handle owners could not be modified with current permissions.\n\n"
+            L"Run the Force Unlock pass once as administrator?",
+            L"Force Unlock",
+            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON1);
+        if (answer == IDYES) {
+            DWORD helperCode = ERROR_GEN_FAILURE;
+            std::wstring helperError;
+            if (!RunElevatedForceUnlockHelper(state->target, helperCode, helperError)) {
+                if (!helperError.empty()) {
+                    MessageBoxW(state->hwnd, helperError.c_str(), L"Force Unlock", MB_ICONERROR);
+                }
+                return false;
+            }
+            details += L" Administrator-assisted Force Unlock pass completed.";
+        }
+    }
+    return true;
+}
+
+void ForceUnlockCurrent(AppState* state) {
+    if (!state || state->target.empty() || state->locks.empty()) {
+        return;
+    }
+    if (IsVolumeRootTarget(state->target)) {
+        MessageBoxW(
+            state->hwnd,
+            L"Force Unlock is intentionally disabled for an entire drive/volume root. "
+            L"Choose a specific file or folder instead.",
+            L"Force Unlock",
+            MB_ICONWARNING);
+        return;
+    }
+
+    bool hasHandleLocks = std::any_of(
+        state->locks.begin(), state->locks.end(),
+        [](const LockProcess& process) { return process.foundByHandleScan; });
+    if (!hasHandleLocks) {
+        MessageBoxW(
+            state->hwnd,
+            L"No matching file handles are currently available to close.\n\n"
+            L"The item may be locked by a loaded executable/module mapping. In that case, "
+            L"Terminate is the remaining user-mode option.",
+            L"Force Unlock",
+            MB_ICONINFORMATION);
+        return;
+    }
+
+    const int answer = MessageBoxW(
+        state->hwnd,
+        L"Force Unlock closes only matching file handles inside other processes instead of "
+        L"terminating the whole process.\n\n"
+        L"This is more invasive than normal Unlock: an application may become unstable if it "
+        L"expects the handle to remain valid. Critical Windows processes are never modified.\n\n"
+        L"Continue?",
+        L"Force Unlock",
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (answer != IDYES) {
+        return;
+    }
+
+    SetStatus(state, L"Force-closing matching file handles...");
+    state->pendingAction = PendingAction::VerifyForceUnlock;
+    std::wstring details;
+    if (!ExecuteForceUnlock(state, true, details)) {
+        state->pendingAction = PendingAction::None;
+        SetStatus(state, L"Force Unlock was not completed.");
+        return;
+    }
+    state->pendingForceUnlockDetails = std::move(details);
+    Sleep(200);
+    StartScan(state);
+}
+
+void GracefulUnlock(AppState* state) {
+    if (state->target.empty()) {
+        return;
+    }
+    if (state->locks.empty()) {
+        MessageBoxW(state->hwnd,
+                    L"No locking processes are currently detected.",
+                    kWindowTitle,
+                    MB_ICONINFORMATION);
+        return;
+    }
+
+    int answer = MessageBoxW(
+        state->hwnd,
+        L"Genia Unlocker will ask applications locking this item to close gracefully.\n\n"
+        L"After the request, Genia Unlocker will rescan the item and report whether the "
+        L"lock was actually released.\n\n"
+        L"Unsaved work in those applications may still be affected. Continue?",
+        L"Unlock",
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (answer != IDYES) {
+        return;
+    }
+
+    SetStatus(state, L"Requesting applications to release the resource...");
+    state->pendingAction = PendingAction::VerifyUnlock;
+    state->pendingUnlockError.clear();
+    std::wstring error;
+    RequestGracefulUnlock(state->target, error);
+    state->pendingUnlockError = std::move(error);
+    Sleep(350);
+    StartScan(state);
+}
+
+void UnlockAndDelete(AppState* state) {
+    if (!state || state->target.empty() || !state->lastTargetExists) {
+        return;
+    }
+    if (!ConfirmDelete(state, L"Unlock & Delete")) {
+        return;
+    }
+
+    // If no blocker matching this target is currently detected, try deletion
+    // immediately. inaccessibleProcessCount is intentionally NOT a veto here:
+    // it means some system processes could not be inspected, not that they are
+    // proven to hold this target. The Windows delete operation itself is the
+    // authoritative final check and will fail safely if a hidden lock remains.
+    if (state->locks.empty()) {
+        TryDeleteCurrentTarget(state, state->permanentDeleteDefault
+            ? L"Permanently deleted successfully."
+            : L"Moved to the Recycle Bin successfully.");
+        return;
+    }
+
+    SetStatus(state, L"Trying a graceful unlock before deletion...");
+    state->pendingAction = PendingAction::UnlockDeleteAfterUnlock;    state->pendingUnlockError.clear();
+    std::wstring error;
+    RequestGracefulUnlock(state->target, error);
+    state->pendingUnlockError = std::move(error);
+    Sleep(350);
+    StartScan(state);
+}
+
+void TerminateSelected(AppState* state) {
+    int row = SelectedLockIndex(state);
+    if (row < 0 || static_cast<size_t>(row) >= state->locks.size()) {
+        MessageBoxW(state->hwnd, L"Select a process first.", kWindowTitle, MB_ICONINFORMATION);
+        return;
+    }
+
+    const LockProcess process = state->locks[static_cast<size_t>(row)];
+    std::wstring unsafeReason;
+    if (IsUnsafeSystemProcess(process.pid, unsafeReason)) {
+        std::wstring message = L"Genia Unlocker will not terminate " + process.name +
+            L" because it is a " + unsafeReason + L".";
+        MessageBoxW(state->hwnd, message.c_str(), L"Protected process", MB_ICONWARNING);
+        return;
+    }
+
+    std::wstring prompt = L"Terminate " + process.name + L" (PID " + std::to_wstring(process.pid) +
+                          L")?\n\nUnsaved data in this process can be lost.";
+    if (MessageBoxW(state->hwnd, prompt.c_str(), L"Terminate process",
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+
+    DWORD error = ERROR_SUCCESS;
+    if (!TerminateProcessByPid(process.pid, error)) {
+        if (error == ERROR_ACCESS_DENIED && !IsRunningElevated()) {
+            DWORD helperCode = ERROR_GEN_FAILURE;
+            std::wstring elevateError;
+            if (!RunElevatedKillHelper(process.pid, helperCode, elevateError)) {
+                MessageBoxW(state->hwnd, elevateError.c_str(), kWindowTitle, MB_ICONERROR);
+                return;
+            }
+        } else {
+            std::wstring message = L"Cannot terminate the process: " + ErrorMessage(error);
+            MessageBoxW(state->hwnd, message.c_str(), kWindowTitle, MB_ICONERROR);
+            return;
+        }
+    }
+
+    Sleep(250);
+    StartScan(state);
+}
+
+void ShowProcessContextMenu(AppState* state, int row, POINT screenPoint) {
+    if (!state || row < 0 || static_cast<size_t>(row) >= state->locks.size()) {
+        return;
+    }
+
+    ListView_SetItemState(state->list, row,
+        LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    const LockProcess& process = state->locks[static_cast<size_t>(row)];
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+
+    UINT forceFlags = MF_STRING;
+    UINT terminateFlags = MF_STRING;
+    std::wstring unsafeReason;
+    if (!process.foundByHandleScan || IsUnsafeSystemProcess(process.pid, unsafeReason)) {
+        forceFlags |= MF_GRAYED;
+    }
+    if (!unsafeReason.empty()) {
+        terminateFlags |= MF_GRAYED;
+    }
+
+    AppendMenuW(menu, forceFlags, ID_PROCESS_FORCE_UNLOCK, L"Force Unlock target");
+    AppendMenuW(menu, terminateFlags, ID_PROCESS_TERMINATE, L"Terminate process");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_PROCESS_OPEN_EXE, L"Open executable location");
+    AppendMenuW(menu, MF_STRING, ID_PROCESS_COPY_OBJECT, L"Copy locked object path(s)");
+    AppendMenuW(menu, MF_STRING, ID_PROCESS_COPY_PID, L"Copy PID");
+
+    SetForegroundWindow(state->hwnd);
+    const UINT command = TrackPopupMenu(
+        menu,
+        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        screenPoint.x, screenPoint.y, 0, state->hwnd, nullptr);
+    DestroyMenu(menu);
+
+    switch (command) {
+    case ID_PROCESS_FORCE_UNLOCK:
+        ForceUnlockCurrent(state);
+        break;
+    case ID_PROCESS_TERMINATE:
+        TerminateSelected(state);
+        break;
+    case ID_PROCESS_OPEN_EXE:
+        RevealProcessExecutable(state, row);
+        break;
+    case ID_PROCESS_COPY_OBJECT: {
+        std::wstring text;
+        for (const auto& object : process.lockedObjects) {
+            if (!text.empty()) text += L"\r\n";
+            text += object;
+        }
+        if (text.empty()) text = state->target;
+        CopyTextToClipboard(state->hwnd, text);
+        break;
+    }
+    case ID_PROCESS_COPY_PID:
+        CopyTextToClipboard(state->hwnd, std::to_wstring(process.pid));
+        break;
+    default:
+        break;
+    }
+}
+
+void RetryScan(AppState* state) {
+    if (!state || state->target.empty()) {
+        StartScan(state);
+        return;
+    }
+
+    if (state->lastInaccessibleProcessCount != 0 && !IsRunningElevated()) {
+        const int answer = MessageBoxW(
+            state->hwnd,
+            L"Some processes that own file handles could not be inspected with current permissions.\n\n"
+            L"Restart Genia Unlocker as administrator and rescan this target?",
+            L"Scan as administrator",
+            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON1);
+        if (answer == IDYES) {
+            std::wstring error;
+            if (RunElevatedScanInstance(state->target, error)) {
+                state->exiting = true;
+                DestroyWindow(state->hwnd);
+                return;
+            }
+            if (!error.empty()) {
+                MessageBoxW(state->hwnd, error.c_str(), kWindowTitle, MB_ICONERROR);
+            }
+            return;
+        }
+    }
+
+    StartScan(state);
+}
+
+bool HandlePendingActionAfterScan(AppState* state, const ScanResult& result) {
+    if (!state || state->pendingAction == PendingAction::None) {
+        return false;
+    }
+
+    const PendingAction action = state->pendingAction;
+    const bool noDetectedLocks = result.targetExists && state->locks.empty();
+    const bool verifiedUnlocked =
+        noDetectedLocks &&
+        result.inaccessibleProcessCount == 0;
+
+    if (action == PendingAction::VerifyUnlock) {
+        state->pendingAction = PendingAction::None;
+
+        if (!result.targetExists) {
+            SetStatus(state, L"The selected path no longer exists.");
+            return true;
+        }
+        if (verifiedUnlocked) {
+            SetStatus(state, L"Unlocked successfully — verified by a clean rescan.");
+            return true;
+        }
+        if (!state->locks.empty()) {
+            std::wstring text = L"Unlock request completed, but the item is still locked by " +
+                std::to_wstring(state->locks.size()) +
+                (state->locks.size() == 1 ? L" process." : L" processes.");
+            if (!state->pendingUnlockError.empty()) {
+                text += L" Windows did not confirm a graceful release.";
+            }
+            SetStatus(state, text);
+            return true;
+        }
+
+        std::wstring text =
+            L"Unlock could not be verified because some file-handle owners could not be inspected.";
+        if (!IsRunningElevated()) {
+            text += L" Use Scan as Admin and try again.";
+        }
+        SetStatus(state, text);
+        return true;
+    }
+
+    if (action == PendingAction::VerifyForceUnlock) {
+        state->pendingAction = PendingAction::None;
+        if (!result.targetExists) {
+            SetStatusWithDetails(state, L"The selected path no longer exists.",
+                                 state->pendingForceUnlockDetails);
+            return true;
+        }
+        if (verifiedUnlocked) {
+            SetStatusWithDetails(state, L"Force Unlock succeeded — verified by a clean rescan.",
+                                 state->pendingForceUnlockDetails);
+            return true;
+        }
+
+        std::wstring shortText;
+        if (!state->locks.empty()) {
+            shortText = L"Force Unlock completed, but " + std::to_wstring(state->locks.size()) +
+                (state->locks.size() == 1 ? L" blocker remains." : L" blockers remain.");
+        } else {
+            shortText = L"Force Unlock completed, but the result needs an administrator rescan.";
+        }
+        std::wstring details = state->pendingForceUnlockDetails;
+        if (!details.empty()) details += L" ";
+        details += L"Loaded executable/module mappings cannot be released by closing ordinary file handles.";
+        SetStatusWithDetails(state, shortText, details);
+        return true;
+    }
+
+    if (action == PendingAction::UnlockDeleteAfterUnlock) {
+        if (!result.targetExists) {
+            state->pendingAction = PendingAction::None;
+            SetStatus(state, L"The selected item no longer exists.");
+            return true;
+        }
+
+        if (noDetectedLocks) {
+            state->pendingAction = PendingAction::None;
+            TryDeleteCurrentTarget(state, state->permanentDeleteDefault
+                ? L"Unlocked and permanently deleted successfully."
+                : L"Unlocked and moved to the Recycle Bin successfully.");
+            return true;
+        }
+
+        const bool hasHandleLocks = std::any_of(
+            state->locks.begin(), state->locks.end(),
+            [](const LockProcess& process) { return process.foundByHandleScan; });
+        if (hasHandleLocks) {
+            const int forceAnswer = MessageBoxW(
+                state->hwnd,
+                L"Normal Unlock did not release the item.\n\n"
+                L"Try Force Unlock next? Genia Unlocker will close only file handles that match "
+                L"this target, without terminating the whole process. Critical Windows processes "
+                L"are skipped.\n\n"
+                L"An application can become unstable if it expects a closed handle to remain valid.",
+                L"Unlock & Delete — Force Unlock",
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1);
+            if (forceAnswer == IDYES) {
+                state->pendingAction = PendingAction::UnlockDeleteAfterForceUnlock;
+                SetStatus(state, L"Trying Force Unlock before process termination...");
+                std::wstring details;
+                if (!ExecuteForceUnlock(state, true, details)) {
+                    state->pendingAction = PendingAction::None;
+                    SetStatus(state, L"Force Unlock was not completed. The item was not deleted.");
+                    return true;
+                }
+                state->pendingForceUnlockDetails = std::move(details);
+                Sleep(250);
+                StartScan(state);
+                return true;
+            }
+        }
+
+        StartTerminateThenDelete(state);
+        return true;
+    }
+
+    if (action == PendingAction::UnlockDeleteAfterForceUnlock) {
+        if (!result.targetExists) {
+            state->pendingAction = PendingAction::None;
+            SetStatusWithDetails(state, L"The selected item no longer exists.",
+                                 state->pendingForceUnlockDetails);
+            return true;
+        }
+        if (noDetectedLocks) {
+            state->pendingAction = PendingAction::None;
+            TryDeleteCurrentTarget(state, state->permanentDeleteDefault
+                ? L"Force-unlocked and permanently deleted successfully."
+                : L"Force-unlocked and moved to the Recycle Bin successfully.");
+            return true;
+        }
+        state->lastStatusDetails = state->pendingForceUnlockDetails;
+        StartTerminateThenDelete(state);
+        return true;
+    }
+
+    if (action == PendingAction::UnlockDeleteAfterTerminate) {
+        state->pendingAction = PendingAction::None;
+
+        if (!result.targetExists) {
+            SetStatus(state, L"The selected item no longer exists.");
+            return true;
+        }
+        if (noDetectedLocks) {
+            TryDeleteCurrentTarget(state, state->permanentDeleteDefault
+                ? L"Blocking processes terminated and item permanently deleted."
+                : L"Blocking processes terminated and item moved to the Recycle Bin.");
+            return true;
+        }
+
+        std::wstring text =
+            L"The item is still locked after process termination, so it was not deleted.";
+        if (result.inaccessibleProcessCount != 0 && !IsRunningElevated()) {
+            text += L" Use Scan as Admin for a deeper rescan.";
+        }
+        SetStatus(state, text);
+        return true;
+    }
+
+    state->pendingAction = PendingAction::None;
+    return false;
+}
+
+std::wstring BuildCurrentDetails(const AppState* state) {
+    if (!state) return {};
+    std::wstring text = state->lastStatusDetails;
+    if (!state->locks.empty()) {
+        if (!text.empty()) text += L"\n\n";
+        text += L"Detected blockers:";
+        for (const auto& process : state->locks) {
+            text += L"\n\n" + BuildProcessInfoText(process);
+        }
+    }
+    if (text.empty()) {
+        text = L"No additional scan details are available.";
+    }
+    return text;
+}
+
+void LayoutControls(AppState* state, int width, int height) {
+    const int margin = Scale(state, 14);
+    const int gap = Scale(state, 7);
+    const int buttonH = Scale(state, 30);
+    const int chooseFileW = Scale(state, 78);
+    const int chooseFolderW = Scale(state, 86);
+    const int settingsW = Scale(state, 88);
+
+    int y = Scale(state, 10);
+    MoveWindow(GetDlgItem(state->hwnd, IDC_APP_TITLE), margin, y,
+               width - margin * 2 - settingsW - gap, Scale(state, 26), TRUE);
+    MoveWindow(GetDlgItem(state->hwnd, IDC_SETTINGS), width - margin - settingsW, y,
+               settingsW, Scale(state, 26), TRUE);
+
+    y += Scale(state, 32);
+    MoveWindow(GetDlgItem(state->hwnd, IDC_TARGET_LABEL), margin, y,
+               Scale(state, 86), Scale(state, 16), TRUE);
+    y += Scale(state, 17);
+
+    int targetW = width - margin * 2 - chooseFileW - chooseFolderW - gap * 2;
+    if (targetW < Scale(state, 210)) targetW = Scale(state, 210);
+    MoveWindow(state->targetEdit, margin, y, targetW, buttonH, TRUE);
+    CenterEditContent(state->targetEdit, state->dpi);
+    MoveWindow(GetDlgItem(state->hwnd, IDC_FILE), margin + targetW + gap, y,
+               chooseFileW, buttonH, TRUE);
+    MoveWindow(GetDlgItem(state->hwnd, IDC_FOLDER),
+               margin + targetW + gap + chooseFileW + gap, y,
+               chooseFolderW, buttonH, TRUE);
+
+    const int listTop = y + buttonH + Scale(state, 8);
+    const int bottomArea = Scale(state, 72);
+    int listHeight = height - listTop - bottomArea;
+    if (listHeight < Scale(state, 150)) listHeight = Scale(state, 150);
+    const int listW = width - margin * 2;
+    MoveWindow(state->list, margin, listTop, listW, listHeight, TRUE);
+    UpdateListColumns(state, listW);
+
+    const int actionsY = listTop + listHeight + Scale(state, 7);
+    const int unlockW = Scale(state, 74);
+    const int forceW = Scale(state, 96);
+    const int terminateW = Scale(state, 84);
+    const int destructiveW = Scale(state, 120);
+    const int retryW = Scale(state, 92);
+
+    int actionX = margin;
+    MoveWindow(GetDlgItem(state->hwnd, IDC_UNLOCK), actionX, actionsY,
+               unlockW, buttonH, TRUE);
+    actionX += unlockW + gap;
+    MoveWindow(GetDlgItem(state->hwnd, IDC_FORCE_UNLOCK), actionX, actionsY,
+               forceW, buttonH, TRUE);
+    actionX += forceW + gap;
+    MoveWindow(GetDlgItem(state->hwnd, IDC_TERMINATE), actionX, actionsY,
+               terminateW, buttonH, TRUE);
+    actionX += terminateW + gap;
+    MoveWindow(GetDlgItem(state->hwnd, IDC_DELETE), actionX, actionsY,
+               destructiveW, buttonH, TRUE);
+    MoveWindow(GetDlgItem(state->hwnd, IDC_UNLOCK_DELETE), actionX, actionsY,
+               destructiveW, buttonH, TRUE);
+    MoveWindow(GetDlgItem(state->hwnd, IDC_RETRY), width - margin - retryW, actionsY,
+               retryW, buttonH, TRUE);
+
+    const int statusY = actionsY + buttonH + Scale(state, 5);
+    const int detailsW = Scale(state, 58);
+    MoveWindow(state->status, margin, statusY,
+               width - margin * 2 - detailsW - gap, Scale(state, 18), TRUE);
+    MoveWindow(GetDlgItem(state->hwnd, IDC_DETAILS), width - margin - detailsW,
+               statusY - Scale(state, 2), detailsW, Scale(state, 22), TRUE);
+}
+
+void CreateControls(AppState* state) {
+    state->dpi = GetDpiForWindow(state->hwnd);
+    if (state->dpi <= 0) state->dpi = 96;
+    RecreateFonts(state);
+
+    CreateWindowW(L"STATIC", L"Genia Unlocker",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_APP_TITLE), nullptr, nullptr);
+    CreateWindowW(L"BUTTON", L"⚙ Settings",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_SETTINGS), nullptr, nullptr);
+    CreateWindowW(L"STATIC", L"Target",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_TARGET_LABEL), nullptr, nullptr);
+
+    state->targetEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOHSCROLL | ES_READONLY,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_TARGET), nullptr, nullptr);
+    CreateWindowW(L"BUTTON", L"File...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_FILE), nullptr, nullptr);
+    CreateWindowW(L"BUTTON", L"Folder...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_FOLDER), nullptr, nullptr);
+
+    state->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_LIST), nullptr, nullptr);
+    ListView_SetExtendedListViewStyle(state->list,
+        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP | LVS_EX_INFOTIP | LVS_EX_HEADERDRAGDROP);
+    RecreateProcessImageList(state);
+
+    struct Column { const wchar_t* text; int width; } columns[] = {
+        {L"Process", 135}, {L"PID", 60}, {L"Method", 105}, {L"Locked object", 330}
+    };
+    for (int i = 0; i < 4; ++i) {
+        LVCOLUMNW col{};
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        col.pszText = const_cast<LPWSTR>(columns[i].text);
+        col.cx = Scale(state, columns[i].width);
+        col.iSubItem = i;
+        ListView_InsertColumn(state->list, i, &col);
+    }
+
+    CreateWindowW(L"BUTTON", L"Unlock", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_UNLOCK), nullptr, nullptr);
+    CreateWindowW(L"BUTTON", L"Force Unlock", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_FORCE_UNLOCK), nullptr, nullptr);
+    CreateWindowW(L"BUTTON", L"Terminate", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_TERMINATE), nullptr, nullptr);
+    CreateWindowW(L"BUTTON", L"Delete", WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_DELETE), nullptr, nullptr);
+    CreateWindowW(L"BUTTON", L"Unlock && Delete", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_UNLOCK_DELETE), nullptr, nullptr);
+    CreateWindowW(L"BUTTON", L"Rescan", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_RETRY), nullptr, nullptr);
+
+    state->status = CreateWindowW(L"STATIC", L"Choose a file or folder, or drop it here.",
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_STATUS), nullptr, nullptr);
+    CreateWindowW(L"BUTTON", L"Details", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_DETAILS), nullptr, nullptr);
+
+    ApplyFonts(state);
+    UpdateTheme(state);
+    DragAcceptFiles(state->hwnd, TRUE);
+    SetStatus(state, L"Choose a file or folder, or drop it here.");
+    UpdateActionButtons(state);
+}
+
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    AppState* state = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<AppState*>(cs->lpCreateParams);
+        state->hwnd = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
+
+    if (state && msg == state->taskbarCreated && state->taskbarCreated != 0) {
+        AddTrayIcon(state);
+        return 0;
+    }
+
+    switch (msg) {
+    case WM_CREATE:
+        CreateControls(state);
+        AddTrayIcon(state);
+        return 0;
+
+    case WM_ERASEBKGND:
+        if (state && state->windowBrush) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(reinterpret_cast<HDC>(wParam), &rc, state->windowBrush);
+            return 1;
+        }
+        break;
+
+    case WM_CTLCOLORSTATIC: {
+        if (!state) break;
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        HWND control = reinterpret_cast<HWND>(lParam);
+        const int id = GetDlgCtrlID(control);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, (id == IDC_STATUS)
+                             ? state->palette.muted
+                             : state->palette.text);        if (id == IDC_TARGET) {
+            SetBkMode(dc, OPAQUE);
+            SetBkColor(dc, state->palette.surface);
+            return reinterpret_cast<LRESULT>(state->surfaceBrush);
+        }
+        return reinterpret_cast<LRESULT>(state->windowBrush);
+    }
+
+    case WM_CTLCOLOREDIT: {
+        if (!state) break;
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, state->palette.text);
+        SetBkColor(dc, state->palette.surface);
+        return reinterpret_cast<LRESULT>(state->surfaceBrush);
+    }
+
+    case WM_CTLCOLORBTN: {
+        if (!state) break;
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, state->palette.text);
+        return reinterpret_cast<LRESULT>(state->windowBrush);
+    }
+
+    case WM_DRAWITEM: {
+        if (!state) break;
+        const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (!draw || draw->CtlType != ODT_BUTTON) break;
+        ModernTheme::ButtonKind kind = ModernTheme::ButtonKind::Secondary;
+        if (draw->CtlID == IDC_UNLOCK) {
+            kind = ModernTheme::ButtonKind::Primary;
+        } else if (draw->CtlID == IDC_TERMINATE ||
+                   draw->CtlID == IDC_DELETE ||
+                   draw->CtlID == IDC_UNLOCK_DELETE) {
+            kind = ModernTheme::ButtonKind::Danger;
+        }
+        ModernTheme::DrawButton(*draw, state->palette, kind);
+        return TRUE;
+    }
+
+    case WM_GETMINMAXINFO:
+        if (state) {
+            auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
+            info->ptMinTrackSize.x = Scale(state, 720);
+            info->ptMinTrackSize.y = Scale(state, 400);
+            return 0;
+        }
+        break;
+
+    case WM_SIZE:
+        if (state) {
+            LayoutControls(state, LOWORD(lParam), HIWORD(lParam));
+        }
+        return 0;
+
+    case WM_DPICHANGED:
+        if (state) {
+            state->dpi = HIWORD(wParam);
+            if (state->dpi <= 0) state->dpi = 96;
+            RecreateFonts(state);
+            ApplyFonts(state);
+            RecreateProcessImageList(state);
+            PopulateList(state);
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                             suggested->right - suggested->left, suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            LayoutControls(state, client.right - client.left, client.bottom - client.top);
+            UpdateTheme(state);
+        }
+        return 0;
+
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        if (state) {
+            UpdateTheme(state);
+        }
+        return 0;
+
+    case WM_DROPFILES: {
+        HDROP drop = reinterpret_cast<HDROP>(wParam);
+        wchar_t path[32768]{};
+        if (DragQueryFileW(drop, 0, path, static_cast<UINT>(_countof(path))) > 0) {
+            SetTarget(state, path);
+        }
+        DragFinish(drop);
+        return 0;
+    }
+
+    case WM_COMMAND: {
+        const int id = LOWORD(wParam);
+        if (id == IDC_FILE || id == ID_TRAY_FILE) {
+            std::wstring path = PickPath(hwnd, false);
+            if (!path.empty()) SetTarget(state, path);
+        } else if (id == IDC_FOLDER) {
+            std::wstring path = PickPath(hwnd, true);
+            if (!path.empty()) SetTarget(state, path);
+        } else if (id == IDC_UNLOCK) {
+            GracefulUnlock(state);
+        } else if (id == IDC_FORCE_UNLOCK) {
+            ForceUnlockCurrent(state);
+        } else if (id == IDC_TERMINATE) {
+            TerminateSelected(state);
+        } else if (id == IDC_DELETE) {
+            DeleteOnly(state);
+        } else if (id == IDC_UNLOCK_DELETE) {
+            UnlockAndDelete(state);
+        } else if (id == IDC_RETRY) {
+            RetryScan(state);
+        } else if (id == IDC_SETTINGS) {
+            ShowSettingsWindow(state);
+        } else if (id == IDC_DETAILS) {
+            const std::wstring details = BuildCurrentDetails(state);
+            MessageBoxW(hwnd, details.c_str(), L"Scan details", MB_ICONINFORMATION);
+        } else if (id == ID_TRAY_EXIT) {
+            state->exiting = true;
+            DestroyWindow(hwnd);
+        } else if (id == ID_TRAY_OPEN) {
+            ActivateMainWindow(state);
+        }
+        return 0;
+    }
+
+    case WM_NOTIFY: {
+        if (state) {
+            const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+            if (header && header->idFrom == IDC_LIST) {
+                if (header->code == LVN_ITEMCHANGED) {
+                    UpdateActionButtons(state);
+                } else if (header->code == NM_DBLCLK) {
+                    const auto* activate = reinterpret_cast<const NMITEMACTIVATE*>(lParam);
+                    if (activate && activate->iItem >= 0) {
+                        RevealProcessExecutable(state, activate->iItem);
+                    }
+                } else if (header->code == NM_RCLICK) {
+                    const auto* activate = reinterpret_cast<const NMITEMACTIVATE*>(lParam);
+                    if (activate && activate->iItem >= 0) {
+                        POINT pt{};
+                        GetCursorPos(&pt);
+                        ShowProcessContextMenu(state, activate->iItem, pt);
+                    }
+                } else if (header->code == LVN_GETINFOTIPW) {
+                    auto* tip = reinterpret_cast<NMLVGETINFOTIPW*>(lParam);
+                    if (tip && tip->iItem >= 0 &&
+                        static_cast<size_t>(tip->iItem) < state->locks.size() &&
+                        tip->pszText && tip->cchTextMax > 0) {
+                        const std::wstring text = BuildProcessInfoText(
+                            state->locks[static_cast<size_t>(tip->iItem)]);
+                        wcsncpy_s(tip->pszText, static_cast<size_t>(tip->cchTextMax),
+                                  text.c_str(), _TRUNCATE);
+                    }
+                }
+            }
+        }
+        break;
+    }
+
+    case WM_APP_SCAN_DONE: {
+        std::unique_ptr<ScanPayload> payload(reinterpret_cast<ScanPayload*>(lParam));
+        if (!payload || payload->generation != state->scanGeneration.load()) {
+            return 0;
+        }
+
+        ScanResult& result = payload->result;
+        state->scanInProgress = false;
+        state->lastTargetExists = result.targetExists;
+        state->lastTargetIsDirectory = result.targetIsDirectory;
+        state->lastInaccessibleProcessCount = result.inaccessibleProcessCount;
+        state->locks = std::move(result.processes);
+        PopulateList(state);
+
+        if (result.inaccessibleProcessCount != 0 && !IsRunningElevated()) {
+            SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Scan as Admin");
+        } else {
+            SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Rescan");
+        }
+        UpdateActionButtons(state);
+
+        if (HandlePendingActionAfterScan(state, result)) {
+            UpdateActionButtons(state);
+            return 0;
+        }
+
+        if (!result.targetExists) {
+            SetStatus(state, L"The selected path no longer exists.");
+        } else if (state->locks.empty()) {
+            if (result.inaccessibleProcessCount != 0) {
+                std::wstring details = L"No lock found, but " +
+                    std::to_wstring(result.inaccessibleProcessCount) +
+                    (result.inaccessibleProcessCount == 1
+                        ? L" process owning file handles could not be inspected."
+                        : L" processes owning file handles could not be inspected.");
+                if (!IsRunningElevated()) {
+                    details += L" Run Scan as Admin to rescan with elevated rights.";
+                    SetStatusWithDetails(state, L"No lock found — administrator scan recommended.", details);
+                } else {
+                    details += L" These are protected system processes that remain inaccessible even when elevated.";
+                    SetStatusWithDetails(state, L"No lock found — some protected processes remain inaccessible.", details);
+                }
+            } else {
+                SetStatus(state, L"No locking processes detected.");
+            }
+        } else {
+            std::wstring shortText = L"\u25CF " + std::to_wstring(state->locks.size()) +
+                (state->locks.size() == 1 ? L" locking process" : L" locking processes");
+            size_t lockedObjectCount = 0;
+            for (const auto& process : state->locks) {
+                lockedObjectCount += process.lockedObjects.size();
+            }
+            std::wstring details = std::to_wstring(state->locks.size()) +
+                (state->locks.size() == 1 ? L" locking process detected." : L" locking processes detected.");
+            if (lockedObjectCount != 0) {
+                details += L" " + std::to_wstring(lockedObjectCount) +
+                    (lockedObjectCount == 1 ? L" locked object path identified."
+                                            : L" locked object paths identified.");
+            }
+            if (result.restartManagerError != ERROR_SUCCESS) {
+                details += L" Handle scan completed; Restart Manager did not accept this resource.";
+            }
+            if (result.inaccessibleProcessCount != 0) {
+                details += L" Some protected/elevated file-handle owners could not be inspected.";
+            }
+            SetStatusWithDetails(state, shortText, details);
+        }
+        return 0;
+    }
+
+    case WM_APP_TRAY:
+        if (LOWORD(lParam) == WM_LBUTTONDBLCLK) {
+            ActivateMainWindow(state);
+        } else if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU) {
+            ShowTrayMenu(state);
+        }
+        return 0;
+
+    case WM_COPYDATA: {
+        const COPYDATASTRUCT* copy = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+        if (copy && copy->lpData && copy->cbData >= sizeof(wchar_t)) {
+            const wchar_t* incoming = reinterpret_cast<const wchar_t*>(copy->lpData);
+            if (*incoming) {
+                SetTarget(state, incoming);
+            } else {
+                ActivateMainWindow(state);
+            }
+        }
+        return TRUE;
+    }
+
+    case WM_CLOSE:
+        // Portable tray behavior: closing the window does not terminate the helper.
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+
+    case WM_DESTROY:
+        if (state) {
+            if (state->settingsWindow && IsWindow(state->settingsWindow)) {
+                DestroyWindow(state->settingsWindow);
+                state->settingsWindow = nullptr;
+            }
+            RemoveTrayIcon(state);
+            if (state->processImageList) {
+                ListView_SetImageList(state->list, nullptr, LVSIL_SMALL);
+                ImageList_Destroy(state->processImageList);
+                state->processImageList = nullptr;
+            }
+            if (state->font) DeleteObject(state->font);
+            if (state->titleFont) DeleteObject(state->titleFont);
+            if (state->windowBrush) DeleteObject(state->windowBrush);
+            if (state->surfaceBrush) DeleteObject(state->surfaceBrush);
+        }
+        PostQuitMessage(0);
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+bool ForwardToExistingInstance(const std::wstring& target) {
+    HWND existing = FindWindowW(kWindowClass, nullptr);
+    if (!existing) {
+        return false;
+    }
+
+    // When Explorer starts this short-lived forwarding instance, transfer the
+    // foreground permission to the already-running Genia Unlocker process.
+    DWORD existingPid = 0;
+    GetWindowThreadProcessId(existing, &existingPid);
+    if (existingPid != 0) {
+        AllowSetForegroundWindow(existingPid);
+    }
+
+    std::wstring payload = target;
+    payload.push_back(L'\0');
+    COPYDATASTRUCT copy{};
+    copy.dwData = 1;
+    copy.cbData = static_cast<DWORD>(payload.size() * sizeof(wchar_t));
+    copy.lpData = payload.data();
+    SendMessageTimeoutW(existing, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&copy),
+                        SMTO_ABORTIFHUNG, 2000, nullptr);
+    return true;
+}
+
+int HandleCommandOnlyActions(const ParsedArgs& args) {
+    std::wstring error;
+    if (args.installShell) {
+        if (!SetShellIntegrationEnabled(true, error)) {
+            MessageBoxW(nullptr, error.c_str(), kWindowTitle, MB_ICONERROR);
+            return 1;
+        }
+        return 0;
+    }
+    if (args.uninstallShell) {
+        if (!SetShellIntegrationEnabled(false, error)) {
+            MessageBoxW(nullptr, error.c_str(), kWindowTitle, MB_ICONERROR);
+            return 1;
+        }
+        return 0;
+    }
+    if (args.enableAutostart) {
+        if (!SetAutostartEnabled(true, error)) {
+            MessageBoxW(nullptr, error.c_str(), kWindowTitle, MB_ICONERROR);
+            return 1;
+        }
+        return 0;
+    }
+    if (args.disableAutostart) {
+        if (!SetAutostartEnabled(false, error)) {
+            MessageBoxW(nullptr, error.c_str(), kWindowTitle, MB_ICONERROR);
+            return 1;
+        }
+        return 0;
+    }
+    return -1;
+}
+
+} // namespace
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+    ParsedArgs args = ParseArguments();
+
+    if (!args.elevatedForceUnlockTarget.empty()) {
+        const ForceUnlockResult result = ForceUnlockHandles(args.elevatedForceUnlockTarget);
+        if (!result.targetExists) {
+            return ERROR_FILE_NOT_FOUND;
+        }
+        // The caller always performs a verification rescan. An elevated pass may
+        // still encounter PPL/protected processes; that is not a helper-launch
+        // failure and should not discard handles that were successfully closed.
+        return ERROR_SUCCESS;
+    }
+
+    if (!args.elevatedKillPids.empty()) {
+        for (DWORD pid : args.elevatedKillPids) {
+            DWORD error = ERROR_SUCCESS;
+            if (!TerminateProcessByPid(pid, error)) {
+                // The process may have exited while UAC was being approved.
+                if (error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_FOUND) {
+                    continue;
+                }
+                return static_cast<int>(error);
+            }
+        }
+        return ERROR_SUCCESS;
+    }
+
+    if (args.elevatedKillPid != 0) {
+        DWORD error = ERROR_SUCCESS;
+        return TerminateProcessByPid(args.elevatedKillPid, error)
+            ? ERROR_SUCCESS
+            : static_cast<int>(error);
+    }
+
+    int commandResult = HandleCommandOnlyActions(args);
+    if (commandResult >= 0) {
+        return commandResult;
+    }
+
+    if (args.showHelp) {
+        MessageBoxW(nullptr,
+            L"Genia Unlocker\n\n"
+            L"--target <path>\n"
+            L"--tray\n"
+            L"--install-shell / --uninstall-shell\n"
+            L"--enable-autostart / --disable-autostart\n"
+            L"Portable build: one native EXE, optional GeniaUnlocker.ini beside it.\n"
+            L"Force Unlock closes matching file handles and skips critical Windows processes.",
+            kWindowTitle, MB_ICONINFORMATION);
+        return 0;
+    }
+
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES};
+    InitCommonControlsEx(&icc);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    // An elevated rescan deliberately uses a separate singleton scope. The
+    // non-elevated instance launches it and immediately exits, avoiding a race
+    // where the elevated child would forward its target back to the process
+    // that lacks permission to inspect the blocker.
+    const wchar_t* mutexName = args.elevatedInstance
+        ? L"Local\\GeniaUnlocker.Singleton.Elevated.1"
+        : kMutexName;
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, mutexName);
+    bool alreadyRunning = mutex && GetLastError() == ERROR_ALREADY_EXISTS;
+    if (alreadyRunning) {
+        if (!args.tray || !args.target.empty()) {
+            ForwardToExistingInstance(args.target);
+        }
+        if (mutex) CloseHandle(mutex);
+        CoUninitialize();
+        return 0;
+    }
+
+    AppState state;
+    state.permanentDeleteDefault = LoadPermanentDeleteDefault();
+    state.icon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+                                               0, 0, LR_DEFAULTSIZE));
+    if (!state.icon) {
+        state.icon = LoadIconW(nullptr, IDI_APPLICATION);
+    }
+    state.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = instance;
+    wc.hIcon = state.icon;
+    wc.hIconSm = state.icon;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;
+    wc.lpszClassName = kWindowClass;
+    if (!RegisterClassExW(&wc)) {
+        if (mutex) CloseHandle(mutex);
+        CoUninitialize();
+        return 1;
+    }
+
+    HWND hwnd = CreateWindowExW(0, kWindowClass, kWindowTitle,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        CW_USEDEFAULT, CW_USEDEFAULT, 780, 460,
+        nullptr, nullptr, instance, &state);
+    if (!hwnd) {
+        if (mutex) CloseHandle(mutex);
+        CoUninitialize();
+        return 1;
+    }
+
+    if (!args.target.empty()) {
+        SetTarget(&state, args.target, !args.tray);
+    }
+
+    if (!args.tray) {
+        ShowWindow(hwnd, showCommand == 0 ? SW_SHOWNORMAL : showCommand);
+        UpdateWindow(hwnd);
+    }
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    if (mutex) CloseHandle(mutex);
+    CoUninitialize();
+    return static_cast<int>(msg.wParam);
+}
