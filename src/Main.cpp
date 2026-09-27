@@ -2330,6 +2330,300 @@ std::wstring BuildDiagnosticReport(const AppState* state) {
     return report;
 }
 
+
+struct DetailsState {
+    AppState* app{};
+    HWND closeButton{};
+    HWND copyButton{};
+    HWND edit{};
+    HFONT font{};
+    HFONT titleFont{};
+    std::wstring detailsText;
+    std::wstring reportText;
+};
+
+std::wstring ToEditText(std::wstring text) {
+    std::wstring converted;
+    converted.reserve(text.size() + 32);
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == L'\n' && (i == 0 || text[i - 1] != L'\r')) {
+            converted += L'\r';
+        }
+        converted += text[i];
+    }
+    return converted;
+}
+
+LRESULT CALLBACK DetailsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* details = reinterpret_cast<DetailsState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        details = reinterpret_cast<DetailsState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(details));
+    }
+
+    AppState* app = details ? details->app : nullptr;
+    switch (msg) {
+    case WM_CREATE: {
+        if (!details || !app) return -1;
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+        details->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+        details->titleFont = CreateModernFont(dpi, 14, FW_SEMIBOLD, L"Segoe UI Variable Display");
+
+        details->closeButton = CreateWindowW(
+            L"BUTTON", L"×",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(548), sc(5), sc(24), sc(22), hwnd,
+            ControlId(IDC_DETAILS_CLOSE), nullptr, nullptr);
+
+        details->edit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", ToEditText(details->detailsText).c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+            ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            sc(16), sc(58), sc(556), sc(260), hwnd,
+            ControlId(IDC_DETAILS_EDIT), nullptr, nullptr);
+
+        details->copyButton = CreateWindowW(
+            L"BUTTON", L"Copy report",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(16), sc(330), sc(104), sc(30), hwnd,
+            ControlId(IDC_DETAILS_COPY), nullptr, nullptr);
+        HWND close = CreateWindowW(
+            L"BUTTON", L"Close",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(496), sc(330), sc(76), sc(30), hwnd,
+            ControlId(IDCANCEL), nullptr, nullptr);
+
+        for (HWND control : {details->closeButton, details->edit,
+                             details->copyButton, close}) {
+            SetFont(control, details->font);
+            ModernTheme::ApplyControlTheme(control, app->palette.dark);
+        }
+
+        SendMessageW(details->edit, EM_SETSEL, 0, 0);
+        ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
+        return 0;
+    }
+
+    case WM_ERASEBKGND:
+        if (app && app->windowBrush) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(reinterpret_cast<HDC>(wParam), &rc, app->windowBrush);
+            return 1;
+        }
+        break;
+
+    case WM_PAINT:
+        if (details && app) {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+            HGDIOBJ oldFont = details->font ? SelectObject(dc, details->font) : nullptr;
+
+            RECT captionRc{sc(10), sc(3), rc.right - sc(48), sc(29)};
+            DrawTextW(dc, L"Genia Unlocker — Details", -1, &captionRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            if (oldFont) SelectObject(dc, oldFont);
+            oldFont = details->titleFont ? SelectObject(dc, details->titleFont) : nullptr;
+            RECT titleRc{sc(16), sc(34), rc.right - sc(16), sc(56)};
+            DrawTextW(dc, L"Scan details", -1, &titleRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        break;
+
+    case WM_CTLCOLOREDIT:
+        if (app) {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(dc, app->palette.text);
+            SetBkColor(dc, app->palette.surface);
+            return reinterpret_cast<LRESULT>(app->surfaceBrush);
+        }
+        break;
+
+    case WM_CTLCOLORBTN:
+        if (app) {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+            return reinterpret_cast<LRESULT>(app->windowBrush);
+        }
+        break;
+
+    case WM_DRAWITEM:
+        if (app) {
+            const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (draw && draw->CtlType == ODT_BUTTON) {
+                ModernTheme::ButtonKind kind =
+                    draw->CtlID == IDC_DETAILS_COPY
+                        ? ModernTheme::ButtonKind::Primary
+                        : ModernTheme::ButtonKind::Secondary;
+                ModernTheme::DrawButton(*draw, app->palette, kind);
+                return TRUE;
+            }
+        }
+        break;
+
+    case WM_COMMAND:
+        if (!details || !app) break;
+        switch (LOWORD(wParam)) {
+        case IDC_DETAILS_CLOSE:
+        case IDCANCEL:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        case IDC_DETAILS_COPY:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                if (CopyTextToClipboard(hwnd, details->reportText)) {
+                    SetWindowTextW(details->copyButton, L"Copied");
+                    SetStatus(app, L"Diagnostic report copied to the clipboard.");
+                    InvalidateRect(details->copyButton, nullptr, TRUE);
+                } else {
+                    MessageBoxW(hwnd, L"Could not copy the diagnostic report.",
+                                kWindowTitle, MB_ICONERROR);
+                }
+            }
+            return 0;
+        }
+        break;
+
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        if (app) {
+            ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
+            ModernTheme::ApplyControlTheme(details->edit, app->palette.dark);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+
+    case WM_NCHITTEST: {
+        POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (details && details->closeButton) {
+            RECT closeRc{};
+            GetWindowRect(details->closeButton, &closeRc);
+            if (PtInRect(&closeRc, pt)) {
+                return HTCLIENT;
+            }
+        }
+        RECT windowRc{};
+        GetWindowRect(hwnd, &windowRc);
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        const int captionHeight = MulDiv(32, dpi, 96);
+        if (pt.y >= windowRc.top && pt.y < windowRc.top + captionHeight) {
+            return HTCAPTION;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        if (app && app->detailsWindow == hwnd) {
+            app->detailsWindow = nullptr;
+        }
+        if (details) {
+            if (details->font) DeleteObject(details->font);
+            if (details->titleFont) DeleteObject(details->titleFont);
+        }
+        delete details;
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void ShowDetailsWindow(AppState* state) {
+    if (!state || !state->hwnd) return;
+
+    if (state->detailsWindow && IsWindow(state->detailsWindow)) {
+        auto* details = reinterpret_cast<DetailsState*>(
+            GetWindowLongPtrW(state->detailsWindow, GWLP_USERDATA));
+        if (details) {
+            details->detailsText = BuildCurrentDetails(state);
+            details->reportText = BuildDiagnosticReport(state);
+            if (details->edit) {
+                const std::wstring editText = ToEditText(details->detailsText);
+                SetWindowTextW(details->edit, editText.c_str());
+                SendMessageW(details->edit, EM_SETSEL, 0, 0);
+            }
+            if (details->copyButton) {
+                SetWindowTextW(details->copyButton, L"Copy report");
+            }
+        }
+        ShowWindow(state->detailsWindow, SW_RESTORE);
+        SetForegroundWindow(state->detailsWindow);
+        return;
+    }
+
+    HINSTANCE instance = reinterpret_cast<HINSTANCE>(
+        GetWindowLongPtrW(state->hwnd, GWLP_HINSTANCE));
+    static bool classReady = false;
+    if (!classReady) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = DetailsWindowProc;
+        wc.hInstance = instance;
+        wc.hIcon = state->icon;
+        wc.hIconSm = state->icon;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = kDetailsWindowClass;
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            MessageBoxW(state->hwnd, L"Could not create the Details window.",
+                        kWindowTitle, MB_ICONERROR);
+            return;
+        }
+        classReady = true;
+    }
+
+    const int dpi = GetDpiForWindow(state->hwnd) > 0 ? GetDpiForWindow(state->hwnd) : 96;
+    const int width = MulDiv(588, dpi, 96);
+    const int height = MulDiv(374, dpi, 96);
+    RECT owner{};
+    GetWindowRect(state->hwnd, &owner);
+    const int x = owner.left + ((owner.right - owner.left) - width) / 2;
+    const int y = owner.top + ((owner.bottom - owner.top) - height) / 2;
+
+    auto* details = new DetailsState{};
+    details->app = state;
+    details->detailsText = BuildCurrentDetails(state);
+    details->reportText = BuildDiagnosticReport(state);
+
+    HWND window = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        kDetailsWindowClass,
+        L"Genia Unlocker — Details",
+        WS_POPUP | WS_BORDER,
+        x, y, width, height,
+        state->hwnd, nullptr, instance, details);
+    if (!window) {
+        delete details;
+        MessageBoxW(state->hwnd, L"Could not open scan details.",
+                    kWindowTitle, MB_ICONERROR);
+        return;
+    }
+
+    state->detailsWindow = window;
+    ShowWindow(window, SW_SHOWNORMAL);
+    UpdateWindow(window);
+}
+
 void LayoutControls(AppState* state, int width, int height) {
     const int margin = Scale(state, 14);
     const int gap = Scale(state, 7);
@@ -2639,8 +2933,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         } else if (id == IDC_SETTINGS) {
             ShowSettingsWindow(state);
         } else if (id == IDC_DETAILS) {
-            const std::wstring details = BuildCurrentDetails(state);
-            MessageBoxW(hwnd, details.c_str(), L"Scan details", MB_ICONINFORMATION);
+            ShowDetailsWindow(state);
         } else if (id == ID_TRAY_ABOUT) {
             ShowAboutDialog(state);
         } else if (id == ID_TRAY_EXIT) {
