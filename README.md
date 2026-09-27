@@ -1,6 +1,17 @@
-# Genia Unlocker 0.4.1 — Final
+# Genia Unlocker 0.5.0 — Preview 1
 
 A lightweight native Windows file/folder unlocker built for **Visual Studio 2026**, x64 and the current Windows 11 SDK.
+
+## v0.5.0 Preview 1
+
+This development preview builds on the stable v0.4.1 Final release.
+
+New in Preview 1:
+- refreshed Genia Unlocker icon for Explorer, tray and context-menu use;
+- native About dialog with author, license and official GitHub links;
+- Copy report for clipboard-ready diagnostics;
+- short verified Delete Retry window before delete-on-reboot escalation;
+- executable metadata updated to GeniaSoftWin / 0.5.0.1.
 
 ## Portable policy
 
