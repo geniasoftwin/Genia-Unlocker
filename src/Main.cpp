@@ -124,6 +124,11 @@ struct AppState {
     std::vector<LockProcess> locks;
     std::atomic<unsigned long long> scanGeneration{0};
     DWORD lastInaccessibleProcessCount{};
+    DWORD lastRestartManagerError{};
+    DWORD lastInspectedDiskHandleCount{};
+    DWORD lastDeleteShareProbeError{};
+    bool lastHandleTypeFilterAvailable{};
+    bool lastDeleteShareProbeSucceeded{};
     bool lastTargetExists{};
     bool lastTargetIsDirectory{};
     bool scanInProgress{};
@@ -742,6 +747,11 @@ void SetTarget(AppState* state, const std::wstring& target, bool showWindow = tr
     state->lastTargetExists = false;
     state->lastTargetIsDirectory = false;
     state->lastInaccessibleProcessCount = 0;
+    state->lastRestartManagerError = ERROR_SUCCESS;
+    state->lastInspectedDiskHandleCount = 0;
+    state->lastDeleteShareProbeError = ERROR_SUCCESS;
+    state->lastHandleTypeFilterAvailable = false;
+    state->lastDeleteShareProbeSucceeded = false;
     SetWindowTextW(state->targetEdit, target.c_str());
     if (showWindow) {
         ActivateMainWindow(state);
@@ -1766,9 +1776,12 @@ bool HandlePendingActionAfterScan(AppState* state, const ScanResult& result) {
 
     const PendingAction action = state->pendingAction;
     const bool noDetectedLocks = result.targetExists && state->locks.empty();
+    // A global count of inaccessible file-handle owners is not evidence that
+    // any of them owns this target. Verify the target itself with a harmless
+    // DELETE-access/share probe instead.
     const bool verifiedUnlocked =
         noDetectedLocks &&
-        result.inaccessibleProcessCount == 0;
+        result.deleteShareProbeSucceeded;
 
     if (action == PendingAction::VerifyUnlock) {
         state->pendingAction = PendingAction::None;
@@ -1941,16 +1954,39 @@ std::wstring BuildCurrentDetails(const AppState* state) {
 std::wstring BuildDiagnosticReport(const AppState* state) {
     if (!state) return {};
 
+    std::wstring targetType = L"(unknown)";
+    if (state->lastTargetExists) {
+        targetType = state->lastTargetIsDirectory ? L"Directory" : L"File";
+    }
+
+    std::wstring deleteShare;
+    if (state->lastDeleteShareProbeSucceeded) {
+        deleteShare = L"Available";
+    } else if (state->lastDeleteShareProbeError == ERROR_SHARING_VIOLATION) {
+        deleteShare = L"Blocked (sharing violation)";
+    } else if (state->lastTargetExists) {
+        deleteShare = L"Unavailable: " + ErrorMessage(state->lastDeleteShareProbeError);
+    } else {
+        deleteShare = L"Not tested";
+    }
+
     std::wstring report =
         L"Genia Unlocker diagnostic report\r\n"
         L"Version: " + std::wstring(kAppVersionDisplay) +
         L"\r\nElevated: " + std::wstring(IsRunningElevated() ? L"Yes" : L"No") +
         L"\r\nTarget: " + (state->target.empty() ? std::wstring(L"(none)") : state->target) +
         L"\r\nTarget exists: " + std::wstring(state->lastTargetExists ? L"Yes" : L"No") +
-        L"\r\nTarget type: " +
-            std::wstring(state->lastTargetIsDirectory ? L"Directory" : L"File / other") +
+        L"\r\nTarget type: " + targetType +
         L"\r\nBlocking processes: " + std::to_wstring(state->locks.size()) +
-        L"\r\nInaccessible handle owners: " +
+        L"\r\nDelete-share probe: " + deleteShare +
+        L"\r\nRestart Manager: " +
+            std::wstring(state->lastRestartManagerError == ERROR_SUCCESS
+                ? L"OK"
+                : ErrorMessage(state->lastRestartManagerError)) +
+        L"\r\nDisk handles inspected: " + std::to_wstring(state->lastInspectedDiskHandleCount) +
+        L"\r\nHandle type filter: " +
+            std::wstring(state->lastHandleTypeFilterAvailable ? L"File ObjectTypeIndex detected" : L"Unavailable / partial scan") +
+        L"\r\nInaccessible file-handle owners: " +
             std::to_wstring(state->lastInaccessibleProcessCount);
 
     if (!state->lastStatusDetails.empty()) {
@@ -2356,10 +2392,19 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         state->lastTargetExists = result.targetExists;
         state->lastTargetIsDirectory = result.targetIsDirectory;
         state->lastInaccessibleProcessCount = result.inaccessibleProcessCount;
+        state->lastRestartManagerError = result.restartManagerError;
+        state->lastInspectedDiskHandleCount = result.inspectedDiskHandleCount;
+        state->lastDeleteShareProbeError = result.deleteShareProbeError;
+        state->lastHandleTypeFilterAvailable = result.handleTypeFilterAvailable;
+        state->lastDeleteShareProbeSucceeded = result.deleteShareProbeSucceeded;
         state->locks = std::move(result.processes);
         PopulateList(state);
 
-        if (result.inaccessibleProcessCount != 0 && !IsRunningElevated()) {
+        const bool unidentifiedSharingLock =
+            state->locks.empty() &&
+            result.deleteShareProbeError == ERROR_SHARING_VIOLATION;
+        if ((result.inaccessibleProcessCount != 0 || unidentifiedSharingLock) &&
+            !IsRunningElevated()) {
             SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Scan as Admin");
         } else {
             SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Rescan");
@@ -2374,21 +2419,46 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!result.targetExists) {
             SetStatus(state, L"The selected path no longer exists.");
         } else if (state->locks.empty()) {
-            if (result.inaccessibleProcessCount != 0) {
-                std::wstring details = L"No lock found, but " +
-                    std::to_wstring(result.inaccessibleProcessCount) +
-                    (result.inaccessibleProcessCount == 1
-                        ? L" process owning file handles could not be inspected."
-                        : L" processes owning file handles could not be inspected.");
+            if (result.deleteShareProbeError == ERROR_SHARING_VIOLATION) {
+                std::wstring details =
+                    L"Windows confirms that delete sharing is blocked for this target, "
+                    L"but the owning process was not identified by Restart Manager or the native handle scan.";
+                if (result.inaccessibleProcessCount != 0) {
+                    details += L" " + std::to_wstring(result.inaccessibleProcessCount) +
+                        (result.inaccessibleProcessCount == 1
+                            ? L" file-handle owner could not be inspected."
+                            : L" file-handle owners could not be inspected.");
+                }
                 if (!IsRunningElevated()) {
-                    details += L" Run Scan as Admin to rescan with elevated rights.";
-                    SetStatusWithDetails(state, L"No lock found — administrator scan recommended.", details);
+                    details += L" Scan as Admin may identify an elevated owner.";
+                    SetStatusWithDetails(state, L"Locked — blocker not identified. Administrator scan recommended.", details);
                 } else {
-                    details += L" These are protected system processes that remain inaccessible even when elevated.";
-                    SetStatusWithDetails(state, L"No lock found — some protected processes remain inaccessible.", details);
+                    SetStatusWithDetails(state, L"Locked — blocker not identified.", details);
+                }
+            } else if (result.deleteShareProbeSucceeded) {
+                std::wstring details;
+                if (result.inaccessibleProcessCount != 0) {
+                    details = std::to_wstring(result.inaccessibleProcessCount) +
+                        (result.inaccessibleProcessCount == 1
+                            ? L" unrelated/protected file-handle owner could not be inspected."
+                            : L" unrelated/protected file-handle owners could not be inspected.");
+                }
+                if (!result.handleTypeFilterAvailable) {
+                    if (!details.empty()) details += L" ";
+                    details += L"Native File ObjectTypeIndex filtering was unavailable, so handle-scan coverage is partial.";
+                }
+                if (details.empty()) {
+                    SetStatus(state, L"No locking processes detected.");
+                } else {
+                    SetStatusWithDetails(state, L"No locking processes detected.", details);
                 }
             } else {
-                SetStatus(state, L"No locking processes detected.");
+                std::wstring details = L"No blocker was detected, but delete-share verification failed: " +
+                    ErrorMessage(result.deleteShareProbeError);
+                if (!result.handleTypeFilterAvailable) {
+                    details += L" Native handle-scan coverage is partial.";
+                }
+                SetStatusWithDetails(state, L"No blocker detected — verification incomplete.", details);
             }
         } else {
             std::wstring shortText = L"\u25CF " + std::to_wstring(state->locks.size()) +
