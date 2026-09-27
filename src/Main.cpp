@@ -497,7 +497,8 @@ bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
     }
     EmptyClipboard();
     const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);    if (!memory) {
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) {
         CloseClipboard();
         return false;
     }
@@ -996,7 +997,8 @@ bool DeleteTargetWithShell(const std::wstring& target,
 
     IFileOperation* operation = nullptr;
     HRESULT hr = CoCreateInstance(
-        CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&operation));    if (FAILED(hr) || !operation) {
+        CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&operation));
+    if (FAILED(hr) || !operation) {
         errorText = L"Cannot initialize the Windows file operation service: " + FormatHResult(hr);
         return false;
     }
@@ -1495,7 +1497,8 @@ void UnlockAndDelete(AppState* state) {
     }
 
     SetStatus(state, L"Trying a graceful unlock before deletion...");
-    state->pendingAction = PendingAction::UnlockDeleteAfterUnlock;    state->pendingUnlockError.clear();
+    state->pendingAction = PendingAction::UnlockDeleteAfterUnlock;
+    state->pendingUnlockError.clear();
     std::wstring error;
     RequestGracefulUnlock(state->target, error);
     state->pendingUnlockError = std::move(error);
@@ -1994,7 +1997,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, (id == IDC_STATUS)
                              ? state->palette.muted
-                             : state->palette.text);        if (id == IDC_TARGET) {
+                             : state->palette.text);
+        if (id == IDC_TARGET) {
             SetBkMode(dc, OPAQUE);
             SetBkColor(dc, state->palette.surface);
             return reinterpret_cast<LRESULT>(state->surfaceBrush);

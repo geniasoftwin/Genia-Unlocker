@@ -370,3 +370,4 @@ bool RunElevatedScanInstance(const std::wstring& target, std::wstring& errorText
     }
     return true;
 }
+
