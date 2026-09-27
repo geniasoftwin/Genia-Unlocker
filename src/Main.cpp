@@ -34,6 +34,9 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"GeniaUnlockerWindow";
 constexpr wchar_t kWindowTitle[] = L"Genia Unlocker";
+constexpr wchar_t kAppVersionDisplay[] = L"0.5.0 Preview 1";
+constexpr wchar_t kRepositoryUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker";
+constexpr wchar_t kIssuesUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker/issues/new";
 constexpr wchar_t kSettingsWindowClass[] = L"GeniaUnlockerSettingsWindow";
 constexpr wchar_t kMutexName[] = L"Local\\GeniaUnlocker.Singleton.1";
 constexpr UINT WM_APP_SCAN_DONE = WM_APP + 10;
@@ -54,16 +57,19 @@ constexpr int IDC_UNLOCK_DELETE = 1016;
 constexpr int IDC_SETTINGS = 1017;
 constexpr int IDC_DETAILS = 1018;
 constexpr int IDC_FORCE_UNLOCK = 1019;
+constexpr int IDC_COPY_REPORT = 1020;
 
 constexpr int IDC_SETTINGS_TITLE = 2001;
 constexpr int IDC_SETTINGS_SHELL = 2002;
 constexpr int IDC_SETTINGS_AUTOSTART = 2003;
 constexpr int IDC_SETTINGS_PERMANENT = 2004;
 constexpr int IDC_SETTINGS_CLOSE = 2005;
+constexpr int IDC_SETTINGS_ABOUT = 2006;
 
 constexpr UINT ID_TRAY_OPEN = 5001;
 constexpr UINT ID_TRAY_FILE = 5002;
 constexpr UINT ID_TRAY_EXIT = 5003;
+constexpr UINT ID_TRAY_ABOUT = 5004;
 constexpr UINT ID_PROCESS_FORCE_UNLOCK = 5101;
 constexpr UINT ID_PROCESS_TERMINATE = 5102;
 constexpr UINT ID_PROCESS_OPEN_EXE = 5103;
@@ -519,6 +525,75 @@ bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
     return true;
 }
 
+void OpenExternalUrl(HWND owner, const wchar_t* url) {
+    if (!url || !*url) return;
+    HINSTANCE result = ShellExecuteW(owner, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) {
+        MessageBoxW(owner, L"Windows could not open the requested link.", kWindowTitle, MB_ICONERROR);
+    }
+}
+
+void ShowAboutDialog(AppState* state) {
+    if (!state) return;
+
+    TASKDIALOG_BUTTON buttons[] = {
+        { 6001, L"GitHub" },
+        { 6002, L"Report issue" },
+        { 6003, L"Copy version info" },
+        { IDCANCEL, L"Close" }
+    };
+
+    std::wstring content =
+        L"Lightweight native Windows file/folder unlocker.\n\n"
+        L"Version: " + std::wstring(kAppVersionDisplay) +
+        L"\nAuthor: GeniaSoftWin"
+        L"\nLicense: MIT"
+        L"\nPlatform: Windows x64 · Native Win32 C++"
+        L"\n\nSource: github.com/geniasoftwin/Genia-Unlocker"
+        L"\n\nCopyright © 2026 GeniaSoftWin";
+
+    TASKDIALOGCONFIG config{};
+    config.cbSize = sizeof(config);
+    config.hwndParent = state->hwnd;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION |
+                     TDF_POSITION_RELATIVE_TO_WINDOW |
+                     TDF_SIZE_TO_CONTENT |
+                     TDF_USE_HICON_MAIN;
+    config.pszWindowTitle = L"About Genia Unlocker";
+    config.pszMainInstruction = L"Genia Unlocker";
+    config.pszContent = content.c_str();
+    config.cButtons = static_cast<UINT>(_countof(buttons));
+    config.pButtons = buttons;
+    config.nDefaultButton = IDCANCEL;
+    config.hMainIcon = state->icon;
+
+    int button = IDCANCEL;
+    HRESULT hr = TaskDialogIndirect(&config, &button, nullptr, nullptr);
+    if (FAILED(hr)) {
+        std::wstring fallback =
+            L"Genia Unlocker\nVersion " + std::wstring(kAppVersionDisplay) +
+            L"\n\nAuthor: GeniaSoftWin\nLicense: MIT"
+            L"\nSource: github.com/geniasoftwin/Genia-Unlocker";
+        MessageBoxW(state->hwnd, fallback.c_str(), L"About Genia Unlocker", MB_ICONINFORMATION);
+        return;
+    }
+
+    if (button == 6001) {
+        OpenExternalUrl(state->hwnd, kRepositoryUrl);
+    } else if (button == 6002) {
+        OpenExternalUrl(state->hwnd, kIssuesUrl);
+    } else if (button == 6003) {
+        std::wstring info =
+            L"Genia Unlocker " + std::wstring(kAppVersionDisplay) +
+            L"\r\nAuthor: GeniaSoftWin"
+            L"\r\nLicense: MIT"
+            L"\r\nSource: " + std::wstring(kRepositoryUrl);
+        if (!CopyTextToClipboard(state->hwnd, info)) {
+            MessageBoxW(state->hwnd, L"Could not copy version information.", kWindowTitle, MB_ICONERROR);
+        }
+    }
+}
+
 void PopulateList(AppState* state) {
     ListView_DeleteAllItems(state->list);
     if (state->processImageList) {
@@ -703,6 +778,8 @@ void ShowTrayMenu(AppState* state) {
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN, L"Open Genia Unlocker");
     AppendMenuW(menu, MF_STRING, ID_TRAY_FILE, L"Select file...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_TRAY_ABOUT, L"About Genia Unlocker");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Exit");
     SetForegroundWindow(state->hwnd);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN,
@@ -716,6 +793,7 @@ struct SettingsState {
     HWND shellCheck{};
     HWND autostartCheck{};
     HWND permanentDeleteCheck{};
+    HWND aboutButton{};
     HFONT font{};
     HFONT titleFont{};
 };
@@ -779,19 +857,26 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         HWND note = CreateWindowW(
             L"STATIC", L"Portable preference is saved beside GeniaUnlocker.exe.",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            sc(16), sc(179), sc(350), sc(22), hwnd,
+            sc(16), sc(177), sc(350), sc(22), hwnd,
             nullptr, nullptr, nullptr);
+        settings->aboutButton = CreateWindowW(
+            L"BUTTON", L"About Genia Unlocker",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(16), sc(204), sc(154), sc(28), hwnd,
+            ControlId(IDC_SETTINGS_ABOUT), nullptr, nullptr);
 
         SetFont(settings->closeButton, settings->font);
         SetFont(title, settings->titleFont);
         SetFont(settings->shellCheck, settings->font);
         SetFont(settings->autostartCheck, settings->font);
         SetFont(settings->permanentDeleteCheck, settings->font);
+        SetFont(settings->aboutButton, settings->font);
         SetFont(note, settings->font);
         ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
         ModernTheme::ApplyControlTheme(settings->shellCheck, app->palette.dark);
         ModernTheme::ApplyControlTheme(settings->autostartCheck, app->palette.dark);
         ModernTheme::ApplyControlTheme(settings->permanentDeleteCheck, app->palette.dark);
+        ModernTheme::ApplyControlTheme(settings->aboutButton, app->palette.dark);
         ModernTheme::ApplyControlTheme(settings->closeButton, app->palette.dark);
         SyncSettingsControls(settings);
         return 0;
@@ -847,6 +932,11 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case IDC_SETTINGS_CLOSE:
             if (HIWORD(wParam) == BN_CLICKED) {
                 DestroyWindow(hwnd);
+            }
+            return 0;
+        case IDC_SETTINGS_ABOUT:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                ShowAboutDialog(app);
             }
             return 0;
         case IDC_SETTINGS_SHELL:
@@ -955,7 +1045,7 @@ void ShowSettingsWindow(AppState* state) {
 
     const int dpi = GetDpiForWindow(state->hwnd) > 0 ? GetDpiForWindow(state->hwnd) : 96;
     const int width = MulDiv(400, dpi, 96);
-    const int height = MulDiv(220, dpi, 96);
+    const int height = MulDiv(250, dpi, 96);
     RECT owner{};
     GetWindowRect(state->hwnd, &owner);
     const int x = owner.left + ((owner.right - owner.left) - width) / 2;
@@ -1207,15 +1297,41 @@ bool TryDeleteCurrentTarget(AppState* state, const std::wstring& successText) {
         ? L"Permanently deleting the selected item..."
         : L"Moving the selected item to the Recycle Bin...");
     std::wstring error;
-    if (DeleteTargetWithShell(state->target, state->permanentDeleteDefault, error)) {
-        state->lastTargetExists = false;
-        state->lastTargetIsDirectory = false;
-        state->lastInaccessibleProcessCount = 0;
-        state->locks.clear();
-        PopulateList(state);
-        SetStatus(state, successText);
-        UpdateActionButtons(state);
-        return true;
+    constexpr int kDeleteAttempts = 4;
+    for (int attempt = 1; attempt <= kDeleteAttempts; ++attempt) {
+        if (DeleteTargetWithShell(state->target, state->permanentDeleteDefault, error)) {
+            state->lastTargetExists = false;
+            state->lastTargetIsDirectory = false;
+            state->lastInaccessibleProcessCount = 0;
+            state->locks.clear();
+            PopulateList(state);
+            SetStatus(state, successText);
+            UpdateActionButtons(state);
+            return true;
+        }
+
+        if (attempt < kDeleteAttempts) {
+            const DWORD attrs = GetFileAttributesW(state->target.c_str());
+            if (attrs == INVALID_FILE_ATTRIBUTES) {
+                const DWORD verifyError = GetLastError();
+                if (verifyError == ERROR_FILE_NOT_FOUND || verifyError == ERROR_PATH_NOT_FOUND) {
+                    state->lastTargetExists = false;
+                    state->lastTargetIsDirectory = false;
+                    state->lastInaccessibleProcessCount = 0;
+                    state->locks.clear();
+                    PopulateList(state);
+                    SetStatus(state, successText);
+                    UpdateActionButtons(state);
+                    return true;
+                }
+            }
+
+            // A process can release/reopen its final handle just after the rescan.
+            // Give Windows a short grace period before escalating to delete-on-reboot.
+            static constexpr DWORD kRetryDelaysMs[] = { 120, 220, 360 };
+            Sleep(kRetryDelaysMs[attempt - 1]);
+            error.clear();
+        }
     }
 
     if (!error.empty()) {
@@ -1822,6 +1938,61 @@ std::wstring BuildCurrentDetails(const AppState* state) {
     return text;
 }
 
+std::wstring BuildDiagnosticReport(const AppState* state) {
+    if (!state) return {};
+
+    std::wstring report =
+        L"Genia Unlocker diagnostic report\r\n"
+        L"Version: " + std::wstring(kAppVersionDisplay) +
+        L"\r\nElevated: " + std::wstring(IsRunningElevated() ? L"Yes" : L"No") +
+        L"\r\nTarget: " + (state->target.empty() ? std::wstring(L"(none)") : state->target) +
+        L"\r\nTarget exists: " + std::wstring(state->lastTargetExists ? L"Yes" : L"No") +
+        L"\r\nTarget type: " +
+            std::wstring(state->lastTargetIsDirectory ? L"Directory" : L"File / other") +
+        L"\r\nBlocking processes: " + std::to_wstring(state->locks.size()) +
+        L"\r\nInaccessible handle owners: " +
+            std::to_wstring(state->lastInaccessibleProcessCount);
+
+    if (!state->lastStatusDetails.empty()) {
+        report += L"\r\n\r\nStatus details:\r\n" + state->lastStatusDetails;
+    }
+
+    if (!state->locks.empty()) {
+        report += L"\r\n\r\nDetected blockers:";
+        for (const auto& process : state->locks) {
+            report += L"\r\n\r\n" + process.name +
+                      L" (PID " + std::to_wstring(process.pid) + L")";
+            if (!process.path.empty()) {
+                report += L"\r\nExecutable: " + process.path;
+            }
+
+            std::wstring method;
+            if (process.foundByRestartManager) method += L"Restart Manager";
+            if (process.foundByHandleScan) {
+                if (!method.empty()) method += L" + ";
+                method += L"Handle";
+            }
+            if (process.foundByProcessImageScan) {
+                if (!method.empty()) method += L" + ";
+                method += L"Image/Module";
+            }
+            if (!method.empty()) {
+                report += L"\r\nDetection: " + method;
+            }
+
+            if (!process.lockedObjects.empty()) {
+                report += L"\r\nLocked objects:";
+                for (const auto& object : process.lockedObjects) {
+                    report += L"\r\n  - " + object;
+                }
+            }
+        }
+    }
+
+    report += L"\r\n\r\nSource: " + std::wstring(kRepositoryUrl);
+    return report;
+}
+
 void LayoutControls(AppState* state, int width, int height) {
     const int margin = Scale(state, 14);
     const int gap = Scale(state, 7);
@@ -1885,8 +2056,12 @@ void LayoutControls(AppState* state, int width, int height) {
 
     const int statusY = actionsY + buttonH + Scale(state, 5);
     const int detailsW = Scale(state, 58);
+    const int reportW = Scale(state, 84);
     MoveWindow(state->status, margin, statusY,
-               width - margin * 2 - detailsW - gap, Scale(state, 18), TRUE);
+               width - margin * 2 - detailsW - reportW - gap * 2, Scale(state, 18), TRUE);
+    MoveWindow(GetDlgItem(state->hwnd, IDC_COPY_REPORT),
+               width - margin - detailsW - reportW - gap,
+               statusY - Scale(state, 2), reportW, Scale(state, 22), TRUE);
     MoveWindow(GetDlgItem(state->hwnd, IDC_DETAILS), width - margin - detailsW,
                statusY - Scale(state, 2), detailsW, Scale(state, 22), TRUE);
 }
@@ -1949,6 +2124,8 @@ void CreateControls(AppState* state) {
     state->status = CreateWindowW(L"STATIC", L"Choose a file or folder, or drop it here.",
         WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_STATUS), nullptr, nullptr);
+    CreateWindowW(L"BUTTON", L"Copy report", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+        0, 0, 0, 0, state->hwnd, ControlId(IDC_COPY_REPORT), nullptr, nullptr);
     CreateWindowW(L"BUTTON", L"Details", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_DETAILS), nullptr, nullptr);
 
@@ -2116,6 +2293,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         } else if (id == IDC_DETAILS) {
             const std::wstring details = BuildCurrentDetails(state);
             MessageBoxW(hwnd, details.c_str(), L"Scan details", MB_ICONINFORMATION);
+        } else if (id == IDC_COPY_REPORT) {
+            const std::wstring report = BuildDiagnosticReport(state);
+            if (CopyTextToClipboard(hwnd, report)) {
+                SetStatus(state, L"Diagnostic report copied to the clipboard.");
+            } else {
+                MessageBoxW(hwnd, L"Could not copy the diagnostic report.", kWindowTitle, MB_ICONERROR);
+            }
+        } else if (id == ID_TRAY_ABOUT) {
+            ShowAboutDialog(state);
         } else if (id == ID_TRAY_EXIT) {
             state->exiting = true;
             DestroyWindow(hwnd);
