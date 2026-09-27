@@ -1,0 +1,39 @@
+name: Windows build
+
+on:
+  push:
+    branches: [ main, v0.5.0-dev ]
+  pull_request:
+    branches: [ main, v0.5.0-dev ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build x64 smoke test
+        shell: cmd
+        run: >
+          msbuild GeniaUnlocker.sln
+          /m
+          /p:Configuration=Portable
+          /p:Platform=x64
+          /p:PlatformToolset=v143
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/GeniaUnlocker.exe")) {
+            throw "dist/GeniaUnlocker.exe was not produced."
+          }
+          Get-Item "dist/GeniaUnlocker.exe" | Format-List FullName,Length,LastWriteTime
