@@ -34,10 +34,12 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"GeniaUnlockerWindow";
 constexpr wchar_t kWindowTitle[] = L"Genia Unlocker";
-constexpr wchar_t kAppVersionDisplay[] = L"0.5.0 Preview 1";
+constexpr wchar_t kAppVersionDisplay[] = L"0.5.0 Preview 2";
 constexpr wchar_t kRepositoryUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker";
 constexpr wchar_t kIssuesUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker/issues/new";
 constexpr wchar_t kSettingsWindowClass[] = L"GeniaUnlockerSettingsWindow";
+constexpr wchar_t kAboutWindowClass[] = L"GeniaUnlockerAboutWindow";
+constexpr wchar_t kDetailsWindowClass[] = L"GeniaUnlockerDetailsWindow";
 constexpr wchar_t kMutexName[] = L"Local\\GeniaUnlocker.Singleton.1";
 constexpr UINT WM_APP_SCAN_DONE = WM_APP + 10;
 constexpr UINT WM_APP_TRAY = WM_APP + 11;
@@ -57,7 +59,6 @@ constexpr int IDC_UNLOCK_DELETE = 1016;
 constexpr int IDC_SETTINGS = 1017;
 constexpr int IDC_DETAILS = 1018;
 constexpr int IDC_FORCE_UNLOCK = 1019;
-constexpr int IDC_COPY_REPORT = 1020;
 
 constexpr int IDC_SETTINGS_TITLE = 2001;
 constexpr int IDC_SETTINGS_SHELL = 2002;
@@ -65,6 +66,16 @@ constexpr int IDC_SETTINGS_AUTOSTART = 2003;
 constexpr int IDC_SETTINGS_PERMANENT = 2004;
 constexpr int IDC_SETTINGS_CLOSE = 2005;
 constexpr int IDC_SETTINGS_ABOUT = 2006;
+constexpr int IDC_SETTINGS_VERSION = 2007;
+
+constexpr int IDC_ABOUT_CLOSE = 3001;
+constexpr int IDC_ABOUT_GITHUB = 3002;
+constexpr int IDC_ABOUT_ISSUE = 3003;
+constexpr int IDC_ABOUT_COPY = 3004;
+
+constexpr int IDC_DETAILS_CLOSE = 4001;
+constexpr int IDC_DETAILS_COPY = 4002;
+constexpr int IDC_DETAILS_EDIT = 4003;
 
 constexpr UINT ID_TRAY_OPEN = 5001;
 constexpr UINT ID_TRAY_FILE = 5002;
@@ -110,6 +121,9 @@ struct AppState {
     HWND list{};
     HWND status{};
     HWND settingsWindow{};
+    HWND aboutWindow{};
+    HWND detailsWindow{};
+    HWND targetTooltip{};
     HFONT font{};
     HFONT titleFont{};
     HBRUSH windowBrush{};
@@ -649,7 +663,7 @@ void UpdateActionButtons(AppState* state) {
     const bool exists = state->lastTargetExists;
     const bool hasLocks = !state->locks.empty();
     const bool verifiedClean =
-        exists && !hasLocks && state->lastInaccessibleProcessCount == 0;
+        exists && !hasLocks && state->lastDeleteShareProbeSucceeded;
     const int selectedRow = state->list
         ? ListView_GetNextItem(state->list, -1, LVNI_SELECTED)
         : -1;
@@ -804,6 +818,7 @@ struct SettingsState {
     HWND autostartCheck{};
     HWND permanentDeleteCheck{};
     HWND aboutButton{};
+    HWND versionLabel{};
     HFONT font{};
     HFONT titleFont{};
 };
@@ -872,8 +887,14 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         settings->aboutButton = CreateWindowW(
             L"BUTTON", L"About Genia Unlocker",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            sc(16), sc(204), sc(154), sc(28), hwnd,
+            sc(16), sc(204), sc(150), sc(28), hwnd,
             ControlId(IDC_SETTINGS_ABOUT), nullptr, nullptr);
+        std::wstring versionText = L"v" + std::wstring(kAppVersionDisplay);
+        settings->versionLabel = CreateWindowW(
+            L"STATIC", versionText.c_str(),
+            WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            sc(184), sc(209), sc(192), sc(20), hwnd,
+            ControlId(IDC_SETTINGS_VERSION), nullptr, nullptr);
 
         SetFont(settings->closeButton, settings->font);
         SetFont(title, settings->titleFont);
@@ -881,6 +902,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         SetFont(settings->autostartCheck, settings->font);
         SetFont(settings->permanentDeleteCheck, settings->font);
         SetFont(settings->aboutButton, settings->font);
+        SetFont(settings->versionLabel, settings->font);
         SetFont(note, settings->font);
         ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
         ModernTheme::ApplyControlTheme(settings->shellCheck, app->palette.dark);
@@ -923,7 +945,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (app) {
             HDC dc = reinterpret_cast<HDC>(wParam);
             SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, app->palette.text);
+            const HWND control = reinterpret_cast<HWND>(lParam);
+            SetTextColor(dc, GetDlgCtrlID(control) == IDC_SETTINGS_VERSION
+                                 ? app->palette.muted
+                                 : app->palette.text);
             return reinterpret_cast<LRESULT>(app->windowBrush);
         }
         break;
@@ -2104,13 +2129,9 @@ void LayoutControls(AppState* state, int width, int height) {
                retryW, buttonH, TRUE);
 
     const int statusY = actionsY + buttonH + Scale(state, 5);
-    const int detailsW = Scale(state, 58);
-    const int reportW = Scale(state, 84);
+    const int detailsW = Scale(state, 66);
     MoveWindow(state->status, margin, statusY,
-               width - margin * 2 - detailsW - reportW - gap * 2, Scale(state, 18), TRUE);
-    MoveWindow(GetDlgItem(state->hwnd, IDC_COPY_REPORT),
-               width - margin - detailsW - reportW - gap,
-               statusY - Scale(state, 2), reportW, Scale(state, 22), TRUE);
+               width - margin * 2 - detailsW - gap, Scale(state, 18), TRUE);
     MoveWindow(GetDlgItem(state->hwnd, IDC_DETAILS), width - margin - detailsW,
                statusY - Scale(state, 2), detailsW, Scale(state, 22), TRUE);
 }
@@ -2133,6 +2154,23 @@ void CreateControls(AppState* state) {
     state->targetEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOHSCROLL | ES_READONLY,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_TARGET), nullptr, nullptr);
+
+    state->targetTooltip = CreateWindowExW(
+        WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        state->hwnd, nullptr, nullptr, nullptr);
+    if (state->targetTooltip) {
+        TOOLINFOW tool{};
+        tool.cbSize = sizeof(tool);
+        tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        tool.hwnd = state->hwnd;
+        tool.uId = reinterpret_cast<UINT_PTR>(state->targetEdit);
+        tool.lpszText = LPSTR_TEXTCALLBACKW;
+        SendMessageW(state->targetTooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+        SendMessageW(state->targetTooltip, TTM_SETMAXTIPWIDTH, 0, Scale(state, 760));
+    }
+
     CreateWindowW(L"BUTTON", L"File...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_FILE), nullptr, nullptr);
     CreateWindowW(L"BUTTON", L"Folder...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
@@ -2173,8 +2211,6 @@ void CreateControls(AppState* state) {
     state->status = CreateWindowW(L"STATIC", L"Choose a file or folder, or drop it here.",
         WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_STATUS), nullptr, nullptr);
-    CreateWindowW(L"BUTTON", L"Copy report", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-        0, 0, 0, 0, state->hwnd, ControlId(IDC_COPY_REPORT), nullptr, nullptr);
     CreateWindowW(L"BUTTON", L"Details", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_DETAILS), nullptr, nullptr);
 
@@ -2342,13 +2378,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         } else if (id == IDC_DETAILS) {
             const std::wstring details = BuildCurrentDetails(state);
             MessageBoxW(hwnd, details.c_str(), L"Scan details", MB_ICONINFORMATION);
-        } else if (id == IDC_COPY_REPORT) {
-            const std::wstring report = BuildDiagnosticReport(state);
-            if (CopyTextToClipboard(hwnd, report)) {
-                SetStatus(state, L"Diagnostic report copied to the clipboard.");
-            } else {
-                MessageBoxW(hwnd, L"Could not copy the diagnostic report.", kWindowTitle, MB_ICONERROR);
-            }
         } else if (id == ID_TRAY_ABOUT) {
             ShowAboutDialog(state);
         } else if (id == ID_TRAY_EXIT) {
@@ -2363,6 +2392,61 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_NOTIFY: {
         if (state) {
             const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+
+            if (header && header->hwndFrom == state->targetTooltip &&
+                header->code == TTN_GETDISPINFOW) {
+                auto* tip = reinterpret_cast<NMTTDISPINFOW*>(lParam);
+                tip->lpszText = state->target.empty()
+                    ? const_cast<LPWSTR>(L"No target selected")
+                    : const_cast<LPWSTR>(state->target.c_str());
+                return 0;
+            }
+
+            const HWND listHeader = state->list ? ListView_GetHeader(state->list) : nullptr;
+            if (header && listHeader && header->hwndFrom == listHeader &&
+                header->code == NM_CUSTOMDRAW) {
+                auto* custom = reinterpret_cast<NMCUSTOMDRAW*>(lParam);
+                if (custom->dwDrawStage == CDDS_PREPAINT) {
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+                if (custom->dwDrawStage == CDDS_ITEMPREPAINT) {
+                    const int itemIndex = static_cast<int>(custom->dwItemSpec);
+                    wchar_t textBuffer[128]{};
+                    HDITEMW item{};
+                    item.mask = HDI_TEXT;
+                    item.pszText = textBuffer;
+                    item.cchTextMax = static_cast<int>(_countof(textBuffer));
+                    Header_GetItem(listHeader, itemIndex, &item);
+
+                    const COLORREF fill = (custom->uItemState & CDIS_SELECTED)
+                        ? state->palette.surfacePressed
+                        : state->palette.surface;
+                    HBRUSH brush = CreateSolidBrush(fill);
+                    FillRect(custom->hdc, &custom->rc, brush);
+                    DeleteObject(brush);
+
+                    HPEN pen = CreatePen(PS_SOLID, 1, state->palette.border);
+                    HGDIOBJ oldPen = SelectObject(custom->hdc, pen);
+                    MoveToEx(custom->hdc, custom->rc.right - 1, custom->rc.top, nullptr);
+                    LineTo(custom->hdc, custom->rc.right - 1, custom->rc.bottom);
+                    MoveToEx(custom->hdc, custom->rc.left, custom->rc.bottom - 1, nullptr);
+                    LineTo(custom->hdc, custom->rc.right, custom->rc.bottom - 1);
+                    SelectObject(custom->hdc, oldPen);
+                    DeleteObject(pen);
+
+                    SetBkMode(custom->hdc, TRANSPARENT);
+                    SetTextColor(custom->hdc, state->palette.text);
+                    HGDIOBJ oldFont = state->font ? SelectObject(custom->hdc, state->font) : nullptr;
+                    RECT textRc = custom->rc;
+                    textRc.left += Scale(state, 8);
+                    textRc.right -= Scale(state, 6);
+                    DrawTextW(custom->hdc, textBuffer, -1, &textRc,
+                              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    if (oldFont) SelectObject(custom->hdc, oldFont);
+                    return CDRF_SKIPDEFAULT;
+                }
+            }
+
             if (header && header->idFrom == IDC_LIST) {
                 if (header->code == LVN_ITEMCHANGED) {
                     UpdateActionButtons(state);
@@ -2461,9 +2545,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     details += L"Native File ObjectTypeIndex filtering was unavailable, so handle-scan coverage is partial.";
                 }
                 if (details.empty()) {
-                    SetStatus(state, L"No locking processes detected.");
+                    SetStatus(state, L"✓ No locking processes detected.");
                 } else {
-                    SetStatusWithDetails(state, L"No locking processes detected.", details);
+                    SetStatusWithDetails(state, L"✓ No locking processes detected.", details);
                 }
             } else {
                 std::wstring details = L"No blocker was detected, but delete-share verification failed: " +
@@ -2523,6 +2607,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DESTROY:
         if (state) {
+            if (state->detailsWindow && IsWindow(state->detailsWindow)) {
+                DestroyWindow(state->detailsWindow);
+                state->detailsWindow = nullptr;
+            }
+            if (state->aboutWindow && IsWindow(state->aboutWindow)) {
+                DestroyWindow(state->aboutWindow);
+                state->aboutWindow = nullptr;
+            }
             if (state->settingsWindow && IsWindow(state->settingsWindow)) {
                 DestroyWindow(state->settingsWindow);
                 state->settingsWindow = nullptr;
