@@ -1748,8 +1748,7 @@ void RetryScan(AppState* state) {
     const bool unidentifiedSharingLock =
         state->locks.empty() &&
         state->lastDeleteShareProbeError == ERROR_SHARING_VIOLATION;
-    if ((state->lastInaccessibleProcessCount != 0 || unidentifiedSharingLock) &&
-        !IsRunningElevated()) {
+    if (unidentifiedSharingLock && !IsRunningElevated()) {
         std::wstring prompt;
         if (unidentifiedSharingLock) {
             prompt =
@@ -2000,7 +1999,7 @@ std::wstring BuildDiagnosticReport(const AppState* state) {
         L"\r\nDisk handles inspected: " + std::to_wstring(state->lastInspectedDiskHandleCount) +
         L"\r\nHandle type filter: " +
             std::wstring(state->lastHandleTypeFilterAvailable ? L"File ObjectTypeIndex detected" : L"Unavailable / partial scan") +
-        L"\r\nInaccessible file-handle owners: " +
+        L"\r\nInaccessible file-handle owners (system-wide): " +
             std::to_wstring(state->lastInaccessibleProcessCount);
 
     if (!state->lastStatusDetails.empty()) {
@@ -2417,8 +2416,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         const bool unidentifiedSharingLock =
             state->locks.empty() &&
             result.deleteShareProbeError == ERROR_SHARING_VIOLATION;
-        if ((result.inaccessibleProcessCount != 0 || unidentifiedSharingLock) &&
-            !IsRunningElevated()) {
+        if (unidentifiedSharingLock && !IsRunningElevated()) {
             SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Scan as Admin");
         } else {
             SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Rescan");
@@ -2454,8 +2452,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (result.inaccessibleProcessCount != 0) {
                     details = std::to_wstring(result.inaccessibleProcessCount) +
                         (result.inaccessibleProcessCount == 1
-                            ? L" unrelated/protected file-handle owner could not be inspected."
-                            : L" unrelated/protected file-handle owners could not be inspected.");
+                            ? L" system-wide file-handle owner could not be inspected."
+                            : L" system-wide file-handle owners could not be inspected.") +
+                        L" Delete sharing is available for the selected target, so these are not treated as target blockers.";
                 }
                 if (!result.handleTypeFilterAvailable) {
                     if (!details.empty()) details += L" ";
@@ -2490,9 +2489,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             if (result.restartManagerError != ERROR_SUCCESS) {
                 details += L" Handle scan completed; Restart Manager did not accept this resource.";
-            }
-            if (result.inaccessibleProcessCount != 0) {
-                details += L" Some protected/elevated file-handle owners could not be inspected.";
             }
             SetStatusWithDetails(state, shortText, details);
         }
