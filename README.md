@@ -1,17 +1,22 @@
-# Genia Unlocker 0.5.0 — Preview 1
+# Genia Unlocker 0.5.0 — Preview 2
 
 A lightweight native Windows file/folder unlocker built for **Visual Studio 2026**, x64 and the current Windows 11 SDK.
 
-## v0.5.0 Preview 1
+## v0.5.0 Preview 2
 
-This development preview builds on the stable v0.4.1 Final release.
+This development preview builds on the stable v0.4.1 Final release and the first v0.5.0 preview.
 
-New in Preview 1:
-- refreshed Genia Unlocker icon for Explorer, tray and context-menu use;
-- native About dialog with author, license and official GitHub links;
-- Copy report for clipboard-ready diagnostics;
-- short verified Delete Retry window before delete-on-reboot escalation;
-- executable metadata updated to GeniaSoftWin / 0.5.0.1.
+New in Preview 2:
+- fixed file-handle type detection and improved Restart Manager retries, including Microsoft Word lock detection;
+- target-level delete-share verification so unrelated inaccessible system handles no longer decide whether a target is clean;
+- dark/light themed About and Details windows matching the main UI;
+- Copy report moved into Details to keep the main toolbar compact;
+- dark custom ListView header, full-target tooltip and clearer status presentation;
+- context-sensitive Delete / Unlock & Delete action based on verified target state;
+- adaptive icon layers: simplified high-contrast symbol at 16–32 px, full G + key artwork at larger sizes;
+- executable metadata updated to GeniaSoftWin / 0.5.0.2.
+
+Preview 1 introduced the refreshed icon, About information, diagnostic report and verified Delete Retry behavior.
 
 ## Portable policy
 
