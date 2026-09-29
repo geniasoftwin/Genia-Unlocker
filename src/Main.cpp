@@ -1382,7 +1382,7 @@ void StartScan(AppState* state) {
     state->scanInProgress = true;
     SetStatusWithDetails(state, L"Scanning...",
         L"Scanning Restart Manager, process images/modules and system file handles...");
-    SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Rescan");
+    SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Scanning…");
     UpdateActionButtons(state);
 
     std::thread([hwnd, generation, target]() {
