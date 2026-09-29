@@ -1,22 +1,21 @@
-# Genia Unlocker 0.5.0 — Preview 2
+# Genia Unlocker 0.5.0 — Preview 3
 
 A lightweight native Windows file/folder unlocker built for **Visual Studio 2026**, x64 and the current Windows 11 SDK.
 
-## v0.5.0 Preview 2
+## v0.5.0 Preview 3
 
-This development preview builds on the stable v0.4.1 Final release and the first v0.5.0 preview.
+This preview focuses on final UI polish before v0.5.0 Final.
 
-New in Preview 2:
-- fixed file-handle type detection and improved Restart Manager retries, including Microsoft Word lock detection;
-- target-level delete-share verification so unrelated inaccessible system handles no longer decide whether a target is clean;
-- dark/light themed About and Details windows matching the main UI;
-- Copy report moved into Details to keep the main toolbar compact;
-- dark custom ListView header, full-target tooltip and clearer status presentation;
-- context-sensitive Delete / Unlock & Delete action based on verified target state;
-- adaptive icon layers: simplified high-contrast symbol at 16–32 px, full G + key artwork at larger sizes;
-- executable metadata updated to GeniaSoftWin / 0.5.0.2.
+New in Preview 3:
+- themed confirmation dialogs for Unlock, Force Unlock, Terminate, Delete, Unlock & Delete, administrator rescans and delete-on-reboot;
+- scan duration shown in status and diagnostic output;
+- clearer structured Details view with Target, Scan Result, Diagnostics and Blockers sections;
+- the Rescan button shows an active **Scanning…** state while work is in progress;
+- main-window size and process-table column widths are saved in portable GeniaUnlocker.ini;
+- per-monitor DPI handling was hardened for Settings, About, Details and confirmation windows;
+- executable metadata updated to GeniaSoftWin / 0.5.0.3.
 
-Preview 1 introduced the refreshed icon, About information, diagnostic report and verified Delete Retry behavior.
+Preview 2 added Word-lock detection fixes, target-level delete-share verification, themed About/Details, adaptive icons and the cleaner main-window layout.
 
 ## Portable policy
 
