@@ -68,6 +68,7 @@ constexpr int IDC_SETTINGS_PERMANENT = 2004;
 constexpr int IDC_SETTINGS_CLOSE = 2005;
 constexpr int IDC_SETTINGS_ABOUT = 2006;
 constexpr int IDC_SETTINGS_VERSION = 2007;
+constexpr int IDC_SETTINGS_NOTE = 2008;
 
 constexpr int IDC_ABOUT_CLOSE = 3001;
 constexpr int IDC_ABOUT_GITHUB = 3002;
@@ -862,6 +863,41 @@ LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         break;
 
+    case WM_DPICHANGED:
+        if (about && app) {
+            const int dpi = HIWORD(wParam) > 0 ? HIWORD(wParam) : 96;
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr,
+                             suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            if (about->font) DeleteObject(about->font);
+            if (about->titleFont) DeleteObject(about->titleFont);
+            if (about->versionFont) DeleteObject(about->versionFont);
+            about->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+            about->titleFont = CreateModernFont(dpi, 16, FW_SEMIBOLD, L"Segoe UI Variable Display");
+            about->versionFont = CreateModernFont(dpi, 9, FW_SEMIBOLD, L"Segoe UI Variable Text");
+
+            MoveWindow(about->closeButton, sc(408), sc(5), sc(24), sc(22), TRUE);
+            MoveWindow(about->githubButton, sc(16), sc(248), sc(72), sc(28), TRUE);
+            MoveWindow(about->issueButton, sc(96), sc(248), sc(92), sc(28), TRUE);
+            MoveWindow(about->copyButton, sc(196), sc(248), sc(86), sc(28), TRUE);
+            MoveWindow(GetDlgItem(hwnd, IDCANCEL), sc(350), sc(248), sc(74), sc(28), TRUE);
+
+            for (HWND button : {about->closeButton, about->githubButton,
+                                about->issueButton, about->copyButton,
+                                GetDlgItem(hwnd, IDCANCEL)}) {
+                SetFont(button, about->font);
+            }
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+
     case WM_THEMECHANGED:
     case WM_SETTINGCHANGE:
         if (app) {
@@ -1135,6 +1171,43 @@ LRESULT CALLBACK ConfirmWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             return 0;
         }
         break;
+
+    case WM_DPICHANGED:
+        if (confirm && app) {
+            const int dpi = HIWORD(wParam) > 0 ? HIWORD(wParam) : 96;
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr,
+                             suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+
+            if (confirm->font) DeleteObject(confirm->font);
+            if (confirm->titleFont) DeleteObject(confirm->titleFont);
+            confirm->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+            confirm->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
+
+            MoveWindow(confirm->closeButton, rc.right - sc(32), sc(5), sc(24), sc(22), TRUE);
+            const int buttonY = rc.bottom - sc(46);
+            const int cancelW = sc(82);
+            const int confirmW = sc(128);
+            MoveWindow(confirm->cancelButton, rc.right - sc(16) - cancelW,
+                       buttonY, cancelW, sc(30), TRUE);
+            MoveWindow(confirm->confirmButton, rc.right - sc(24) - cancelW - confirmW,
+                       buttonY, confirmW, sc(30), TRUE);
+
+            for (HWND button : {confirm->closeButton, confirm->confirmButton,
+                                confirm->cancelButton}) {
+                SetFont(button, confirm->font);
+            }
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
 
     case WM_NCHITTEST: {
         POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -1553,7 +1626,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             L"STATIC", L"Portable preference is saved beside GeniaUnlocker.exe.",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             sc(16), sc(177), sc(350), sc(22), hwnd,
-            nullptr, nullptr, nullptr);
+            ControlId(IDC_SETTINGS_NOTE), nullptr, nullptr);
         settings->aboutButton = CreateWindowW(
             L"BUTTON", L"About Genia Unlocker",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
@@ -1683,6 +1756,44 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
         break;
+    case WM_DPICHANGED:
+        if (settings && app) {
+            const int dpi = HIWORD(wParam) > 0 ? HIWORD(wParam) : 96;
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr,
+                             suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            if (settings->font) DeleteObject(settings->font);
+            if (settings->titleFont) DeleteObject(settings->titleFont);
+            settings->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+            settings->titleFont = CreateModernFont(dpi, 15, FW_SEMIBOLD, L"Segoe UI Variable Display");
+
+            MoveWindow(settings->closeButton, sc(368), sc(5), sc(24), sc(22), TRUE);
+            MoveWindow(GetDlgItem(hwnd, IDC_SETTINGS_TITLE), sc(16), sc(42), sc(330), sc(28), TRUE);
+            MoveWindow(settings->shellCheck, sc(16), sc(84), sc(320), sc(24), TRUE);
+            MoveWindow(settings->autostartCheck, sc(16), sc(112), sc(340), sc(24), TRUE);
+            MoveWindow(settings->permanentDeleteCheck, sc(16), sc(144), sc(350), sc(24), TRUE);
+            MoveWindow(GetDlgItem(hwnd, IDC_SETTINGS_NOTE), sc(16), sc(177), sc(350), sc(22), TRUE);
+            MoveWindow(settings->aboutButton, sc(16), sc(204), sc(150), sc(28), TRUE);
+            MoveWindow(settings->versionLabel, sc(184), sc(209), sc(192), sc(20), TRUE);
+
+            for (HWND control : {settings->closeButton, settings->shellCheck,
+                                 settings->autostartCheck, settings->permanentDeleteCheck,
+                                 settings->aboutButton, settings->versionLabel,
+                                 GetDlgItem(hwnd, IDC_SETTINGS_NOTE)}) {
+                SetFont(control, settings->font);
+            }
+            SetFont(GetDlgItem(hwnd, IDC_SETTINGS_TITLE), settings->titleFont);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+
     case WM_NCHITTEST: {
         // Make the custom caption draggable while keeping the inset Close
         // button clickable. Coordinates in lParam are screen coordinates.
@@ -2946,6 +3057,37 @@ LRESULT CALLBACK DetailsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             return 0;
         }
         break;
+
+    case WM_DPICHANGED:
+        if (details && app) {
+            const int dpi = HIWORD(wParam) > 0 ? HIWORD(wParam) : 96;
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr,
+                             suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            if (details->font) DeleteObject(details->font);
+            if (details->titleFont) DeleteObject(details->titleFont);
+            details->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+            details->titleFont = CreateModernFont(dpi, 14, FW_SEMIBOLD, L"Segoe UI Variable Display");
+
+            MoveWindow(details->closeButton, sc(548), sc(5), sc(24), sc(22), TRUE);
+            MoveWindow(details->edit, sc(16), sc(58), sc(556), sc(260), TRUE);
+            MoveWindow(details->copyButton, sc(16), sc(330), sc(104), sc(30), TRUE);
+            MoveWindow(GetDlgItem(hwnd, IDCANCEL), sc(496), sc(330), sc(76), sc(30), TRUE);
+
+            for (HWND control : {details->closeButton, details->edit,
+                                 details->copyButton, GetDlgItem(hwnd, IDCANCEL)}) {
+                SetFont(control, details->font);
+            }
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
 
     case WM_THEMECHANGED:
     case WM_SETTINGCHANGE:
