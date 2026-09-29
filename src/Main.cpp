@@ -78,6 +78,10 @@ constexpr int IDC_DETAILS_CLOSE = 4001;
 constexpr int IDC_DETAILS_COPY = 4002;
 constexpr int IDC_DETAILS_EDIT = 4003;
 
+constexpr int IDC_CONFIRM_CLOSE = 6001;
+constexpr int IDC_CONFIRM_OK = 6002;
+constexpr int IDC_CONFIRM_CANCEL = 6003;
+
 constexpr UINT ID_TRAY_OPEN = 5001;
 constexpr UINT ID_TRAY_FILE = 5002;
 constexpr UINT ID_TRAY_EXIT = 5003;
@@ -969,6 +973,314 @@ void ShowAboutDialog(AppState* state) {
     UpdateWindow(window);
 }
 
+
+struct ConfirmState {
+    AppState* app{};
+    std::wstring title;
+    std::wstring message;
+    std::wstring confirmText;
+    std::wstring cancelText;
+    bool danger{};
+    bool defaultConfirm{};
+    bool result{};
+    bool finished{};
+    HWND closeButton{};
+    HWND confirmButton{};
+    HWND cancelButton{};
+    HFONT font{};
+    HFONT titleFont{};
+};
+
+LRESULT CALLBACK ConfirmWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* confirm = reinterpret_cast<ConfirmState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        confirm = reinterpret_cast<ConfirmState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(confirm));
+    }
+
+    AppState* app = confirm ? confirm->app : nullptr;
+    switch (msg) {
+    case WM_CREATE: {
+        if (!confirm || !app) return -1;
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+        confirm->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+        confirm->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
+
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        confirm->closeButton = CreateWindowW(
+            L"BUTTON", L"×",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            rc.right - sc(32), sc(5), sc(24), sc(22), hwnd,
+            ControlId(IDC_CONFIRM_CLOSE), nullptr, nullptr);
+
+        const int buttonY = rc.bottom - sc(46);
+        const int cancelW = sc(82);
+        const int confirmW = sc(128);
+        confirm->cancelButton = CreateWindowW(
+            L"BUTTON", confirm->cancelText.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            rc.right - sc(16) - cancelW, buttonY, cancelW, sc(30), hwnd,
+            ControlId(IDC_CONFIRM_CANCEL), nullptr, nullptr);
+        confirm->confirmButton = CreateWindowW(
+            L"BUTTON", confirm->confirmText.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            rc.right - sc(24) - cancelW - confirmW, buttonY, confirmW, sc(30), hwnd,
+            ControlId(IDC_CONFIRM_OK), nullptr, nullptr);
+
+        for (HWND button : {confirm->closeButton, confirm->confirmButton, confirm->cancelButton}) {
+            SetFont(button, confirm->font);
+            ModernTheme::ApplyControlTheme(button, app->palette.dark);
+        }
+        ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
+        SetFocus(confirm->defaultConfirm ? confirm->confirmButton : confirm->cancelButton);
+        return 0;
+    }
+
+    case WM_ERASEBKGND:
+        if (app && app->windowBrush) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(reinterpret_cast<HDC>(wParam), &rc, app->windowBrush);
+            return 1;
+        }
+        break;
+
+    case WM_PAINT:
+        if (confirm && app) {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+
+            HGDIOBJ oldFont = confirm->font ? SelectObject(dc, confirm->font) : nullptr;
+            RECT captionRc{sc(10), sc(3), rc.right - sc(42), sc(29)};
+            DrawTextW(dc, L"Genia Unlocker", -1, &captionRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            HICON warning = LoadIconW(nullptr, IDI_WARNING);
+            if (warning) {
+                DrawIconEx(dc, sc(18), sc(47), warning, sc(30), sc(30), 0, nullptr, DI_NORMAL);
+            }
+
+            oldFont = confirm->titleFont ? SelectObject(dc, confirm->titleFont) : nullptr;
+            RECT titleRc{sc(62), sc(44), rc.right - sc(18), sc(79)};
+            DrawTextW(dc, confirm->title.c_str(), -1, &titleRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            oldFont = confirm->font ? SelectObject(dc, confirm->font) : nullptr;
+            RECT messageRc{sc(18), sc(88), rc.right - sc(18), rc.bottom - sc(62)};
+            DrawTextW(dc, confirm->message.c_str(), -1, &messageRc,
+                      DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            HPEN pen = CreatePen(PS_SOLID, 1, app->palette.border);
+            HGDIOBJ oldPen = SelectObject(dc, pen);
+            MoveToEx(dc, sc(16), rc.bottom - sc(58), nullptr);
+            LineTo(dc, rc.right - sc(16), rc.bottom - sc(58));
+            SelectObject(dc, oldPen);
+            DeleteObject(pen);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        break;
+
+    case WM_DRAWITEM:
+        if (app && confirm) {
+            const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (draw && draw->CtlType == ODT_BUTTON) {
+                ModernTheme::ButtonKind kind = ModernTheme::ButtonKind::Secondary;
+                if (draw->CtlID == IDC_CONFIRM_OK) {
+                    kind = confirm->danger
+                        ? ModernTheme::ButtonKind::Danger
+                        : ModernTheme::ButtonKind::Primary;
+                }
+                ModernTheme::DrawButton(*draw, app->palette, kind);
+                return TRUE;
+            }
+        }
+        break;
+
+    case WM_CTLCOLORBTN:
+        if (app) {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+            return reinterpret_cast<LRESULT>(app->windowBrush);
+        }
+        break;
+
+    case WM_COMMAND:
+        if (!confirm) break;
+        if (LOWORD(wParam) == IDC_CONFIRM_OK && HIWORD(wParam) == BN_CLICKED) {
+            confirm->result = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if ((LOWORD(wParam) == IDC_CONFIRM_CANCEL || LOWORD(wParam) == IDC_CONFIRM_CLOSE) &&
+            HIWORD(wParam) == BN_CLICKED) {
+            confirm->result = false;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+
+    case WM_NCHITTEST: {
+        POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (confirm && confirm->closeButton) {
+            RECT closeRc{};
+            GetWindowRect(confirm->closeButton, &closeRc);
+            if (PtInRect(&closeRc, pt)) {
+                return HTCLIENT;
+            }
+        }
+        RECT windowRc{};
+        GetWindowRect(hwnd, &windowRc);
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        if (pt.y >= windowRc.top && pt.y < windowRc.top + MulDiv(32, dpi, 96)) {
+            return HTCAPTION;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        if (confirm) confirm->result = false;
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        if (confirm) {
+            confirm->finished = true;
+            if (confirm->font) DeleteObject(confirm->font);
+            if (confirm->titleFont) DeleteObject(confirm->titleFont);
+            confirm->font = nullptr;
+            confirm->titleFont = nullptr;
+        }
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+bool ShowThemedConfirm(AppState* state,
+                       const std::wstring& title,
+                       const std::wstring& message,
+                       const std::wstring& confirmText,
+                       const std::wstring& cancelText = L"Cancel",
+                       bool danger = false,
+                       bool defaultConfirm = false) {
+    if (!state || !state->hwnd) return false;
+
+    HINSTANCE instance = reinterpret_cast<HINSTANCE>(
+        GetWindowLongPtrW(state->hwnd, GWLP_HINSTANCE));
+    static bool classReady = false;
+    if (!classReady) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = ConfirmWindowProc;
+        wc.hInstance = instance;
+        wc.hIcon = state->icon;
+        wc.hIconSm = state->icon;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = kConfirmWindowClass;
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            return MessageBoxW(state->hwnd, message.c_str(), title.c_str(),
+                               MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+        }
+        classReady = true;
+    }
+
+    const int dpi = GetDpiForWindow(state->hwnd) > 0 ? GetDpiForWindow(state->hwnd) : 96;
+    const int width = MulDiv(540, dpi, 96);
+
+    HDC dc = GetDC(state->hwnd);
+    RECT measure{0, 0, width - MulDiv(36, dpi, 96), 0};
+    HGDIOBJ oldFont = state->font ? SelectObject(dc, state->font) : nullptr;
+    DrawTextW(dc, message.c_str(), -1, &measure,
+              DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    if (oldFont) SelectObject(dc, oldFont);
+    ReleaseDC(state->hwnd, dc);
+
+    const int minHeight = MulDiv(230, dpi, 96);
+    const int maxHeight = MulDiv(470, dpi, 96);
+    const int desiredHeight = measure.bottom + MulDiv(165, dpi, 96);
+    const int height = (std::max)(minHeight, (std::min)(maxHeight, desiredHeight));
+
+    RECT owner{};
+    GetWindowRect(state->hwnd, &owner);
+    const int x = owner.left + ((owner.right - owner.left) - width) / 2;
+    const int y = owner.top + ((owner.bottom - owner.top) - height) / 2;
+
+    ConfirmState confirm{};
+    confirm.app = state;
+    confirm.title = title;
+    confirm.message = message;
+    confirm.confirmText = confirmText;
+    confirm.cancelText = cancelText;
+    confirm.danger = danger;
+    confirm.defaultConfirm = defaultConfirm;
+
+    HWND window = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_DLGMODALFRAME,
+        kConfirmWindowClass,
+        title.c_str(),
+        WS_POPUP | WS_BORDER,
+        x, y, width, height,
+        state->hwnd, nullptr, instance, &confirm);
+    if (!window) {
+        return MessageBoxW(state->hwnd, message.c_str(), title.c_str(),
+                           MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+    }
+
+    EnableWindow(state->hwnd, FALSE);
+    ShowWindow(window, SW_SHOWNORMAL);
+    UpdateWindow(window);
+
+    MSG msg{};
+    while (!confirm.finished) {
+        const BOOL status = GetMessageW(&msg, nullptr, 0, 0);
+        if (status <= 0) {
+            if (status == 0) PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+
+        if ((msg.hwnd == window || IsChild(window, msg.hwnd)) && msg.message == WM_KEYDOWN) {
+            if (msg.wParam == VK_ESCAPE) {
+                confirm.result = false;
+                DestroyWindow(window);
+                continue;
+            }
+            if (msg.wParam == VK_RETURN) {
+                confirm.result = confirm.defaultConfirm;
+                if (!confirm.defaultConfirm && msg.hwnd == confirm.confirmButton) {
+                    confirm.result = true;
+                }
+                DestroyWindow(window);
+                continue;
+            }
+        }
+
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    EnableWindow(state->hwnd, TRUE);
+    SetForegroundWindow(state->hwnd);
+    return confirm.result;
+}
+
 void PopulateList(AppState* state) {
     ListView_DeleteAllItems(state->list);
     if (state->processImageList) {
@@ -1599,10 +1911,10 @@ bool ConfirmDelete(AppState* state, const wchar_t* title) {
         prompt += L"\n\nYou can change the default delete mode in Settings.";
     }
 
-    return MessageBoxW(state->hwnd,
-                       prompt.c_str(),
-                       title,
-                       MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+    return ShowThemedConfirm(
+        state, title, prompt,
+        state->permanentDeleteDefault ? L"Delete permanently" : L"Delete",
+        L"Cancel", true, false);
 }
 
 bool ScheduleDeleteOnRebootRecursive(const std::wstring& path, std::wstring& errorText) {
@@ -1659,14 +1971,16 @@ bool OfferDeleteOnReboot(AppState* state) {
     if (!state || state->target.empty() || IsVolumeRootTarget(state->target)) {
         return false;
     }
-    const int answer = MessageBoxW(
-        state->hwnd,
-        L"Windows could not delete the item now.\n\n"
-        L"Schedule it for permanent deletion at the next Windows startup?\n\n"
-        L"This fallback does not use the Recycle Bin and cannot be undone after restart.",
-        L"Delete on reboot",
-        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-    if (answer != IDYES) {
+    if (!ShowThemedConfirm(
+            state,
+            L"Delete on reboot",
+            L"Windows could not delete the item now.\n\n"
+            L"Schedule it for permanent deletion at the next Windows startup?\n\n"
+            L"This fallback does not use the Recycle Bin and cannot be undone after restart.",
+            L"Schedule",
+            L"Cancel",
+            true,
+            false)) {
         return false;
     }
 
@@ -1809,10 +2123,9 @@ bool TerminateDetectedForDelete(AppState* state, std::wstring& errorText) {
 
 bool StartTerminateThenDelete(AppState* state) {
     const std::wstring prompt = BuildBlockingProcessPrompt(state);
-    if (MessageBoxW(state->hwnd,
-                    prompt.c_str(),
-                    L"Unlock & Delete",
-                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+    if (!ShowThemedConfirm(
+            state, L"Unlock & Delete", prompt,
+            L"Terminate & Delete", L"Cancel", true, false)) {
         state->pendingAction = PendingAction::None;
         SetStatus(state, L"Deletion cancelled. The item is still locked.");
         return false;
@@ -1876,13 +2189,15 @@ bool ExecuteForceUnlock(AppState* state, bool allowElevation, std::wstring& deta
     details = FormatForceUnlockResult(result);
 
     if (result.inaccessibleProcessCount != 0 && !IsRunningElevated() && allowElevation) {
-        const int answer = MessageBoxW(
-            state->hwnd,
-            L"Some matching file-handle owners could not be modified with current permissions.\n\n"
-            L"Run the Force Unlock pass once as administrator?",
-            L"Force Unlock",
-            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON1);
-        if (answer == IDYES) {
+        if (ShowThemedConfirm(
+                state,
+                L"Force Unlock",
+                L"Some matching file-handle owners could not be modified with current permissions.\n\n"
+                L"Run the Force Unlock pass once as administrator?",
+                L"Run as Admin",
+                L"Not now",
+                false,
+                true)) {
             DWORD helperCode = ERROR_GEN_FAILURE;
             std::wstring helperError;
             if (!RunElevatedForceUnlockHelper(state->target, helperCode, helperError)) {
@@ -1925,16 +2240,17 @@ void ForceUnlockCurrent(AppState* state) {
         return;
     }
 
-    const int answer = MessageBoxW(
-        state->hwnd,
-        L"Force Unlock closes only matching file handles inside other processes instead of "
-        L"terminating the whole process.\n\n"
-        L"This is more invasive than normal Unlock: an application may become unstable if it "
-        L"expects the handle to remain valid. Critical Windows processes are never modified.\n\n"
-        L"Continue?",
-        L"Force Unlock",
-        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-    if (answer != IDYES) {
+    if (!ShowThemedConfirm(
+            state,
+            L"Force Unlock",
+            L"Force Unlock closes only matching file handles inside other processes instead of "
+            L"terminating the whole process.\n\n"
+            L"This is more invasive than normal Unlock: an application may become unstable if it "
+            L"expects the handle to remain valid. Critical Windows processes are never modified.",
+            L"Force Unlock",
+            L"Cancel",
+            false,
+            false)) {
         return;
     }
 
@@ -1963,15 +2279,17 @@ void GracefulUnlock(AppState* state) {
         return;
     }
 
-    int answer = MessageBoxW(
-        state->hwnd,
-        L"Genia Unlocker will ask applications locking this item to close gracefully.\n\n"
-        L"After the request, Genia Unlocker will rescan the item and report whether the "
-        L"lock was actually released.\n\n"
-        L"Unsaved work in those applications may still be affected. Continue?",
-        L"Unlock",
-        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-    if (answer != IDYES) {
+    if (!ShowThemedConfirm(
+            state,
+            L"Unlock",
+            L"Genia Unlocker will ask applications locking this item to close gracefully.\n\n"
+            L"After the request, Genia Unlocker will rescan the item and report whether the "
+            L"lock was actually released.\n\n"
+            L"Unsaved work in those applications may still be affected.",
+            L"Unlock",
+            L"Cancel",
+            false,
+            false)) {
         return;
     }
 
@@ -2033,8 +2351,9 @@ void TerminateSelected(AppState* state) {
 
     std::wstring prompt = L"Terminate " + process.name + L" (PID " + std::to_wstring(process.pid) +
                           L")?\n\nUnsaved data in this process can be lost.";
-    if (MessageBoxW(state->hwnd, prompt.c_str(), L"Terminate process",
-                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+    if (!ShowThemedConfirm(
+            state, L"Terminate process", prompt,
+            L"Terminate", L"Cancel", true, false)) {
         return;
     }
 
@@ -2143,12 +2462,14 @@ void RetryScan(AppState* state) {
                 L"Some processes that own file handles could not be inspected with current permissions.\n\n"
                 L"Restart Genia Unlocker as administrator and rescan this target?";
         }
-        const int answer = MessageBoxW(
-            state->hwnd,
-            prompt.c_str(),
-            L"Scan as administrator",
-            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON1);
-        if (answer == IDYES) {
+        if (ShowThemedConfirm(
+                state,
+                L"Scan as administrator",
+                prompt,
+                L"Scan as Admin",
+                L"Cancel",
+                false,
+                true)) {
             std::wstring error;
             if (RunElevatedScanInstance(state->target, error)) {
                 state->exiting = true;
@@ -2256,16 +2577,18 @@ bool HandlePendingActionAfterScan(AppState* state, const ScanResult& result) {
             state->locks.begin(), state->locks.end(),
             [](const LockProcess& process) { return process.foundByHandleScan; });
         if (hasHandleLocks) {
-            const int forceAnswer = MessageBoxW(
-                state->hwnd,
-                L"Normal Unlock did not release the item.\n\n"
-                L"Try Force Unlock next? Genia Unlocker will close only file handles that match "
-                L"this target, without terminating the whole process. Critical Windows processes "
-                L"are skipped.\n\n"
-                L"An application can become unstable if it expects a closed handle to remain valid.",
-                L"Unlock & Delete — Force Unlock",
-                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1);
-            if (forceAnswer == IDYES) {
+            if (ShowThemedConfirm(
+                    state,
+                    L"Unlock & Delete — Force Unlock",
+                    L"Normal Unlock did not release the item.\n\n"
+                    L"Try Force Unlock next? Genia Unlocker will close only file handles that match "
+                    L"this target, without terminating the whole process. Critical Windows processes "
+                    L"are skipped.\n\n"
+                    L"An application can become unstable if it expects a closed handle to remain valid.",
+                    L"Try Force Unlock",
+                    L"Skip",
+                    false,
+                    true)) {
                 state->pendingAction = PendingAction::UnlockDeleteAfterForceUnlock;
                 SetStatus(state, L"Trying Force Unlock before process termination...");
                 std::wstring details;
