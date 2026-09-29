@@ -34,12 +34,13 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"GeniaUnlockerWindow";
 constexpr wchar_t kWindowTitle[] = L"Genia Unlocker";
-constexpr wchar_t kAppVersionDisplay[] = L"0.5.0 Preview 2";
+constexpr wchar_t kAppVersionDisplay[] = L"0.5.0 Preview 3";
 constexpr wchar_t kRepositoryUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker";
 constexpr wchar_t kIssuesUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker/issues/new";
 constexpr wchar_t kSettingsWindowClass[] = L"GeniaUnlockerSettingsWindow";
 constexpr wchar_t kAboutWindowClass[] = L"GeniaUnlockerAboutWindow";
 constexpr wchar_t kDetailsWindowClass[] = L"GeniaUnlockerDetailsWindow";
+constexpr wchar_t kConfirmWindowClass[] = L"GeniaUnlockerConfirmWindow";
 constexpr wchar_t kMutexName[] = L"Local\\GeniaUnlocker.Singleton.1";
 constexpr UINT WM_APP_SCAN_DONE = WM_APP + 10;
 constexpr UINT WM_APP_TRAY = WM_APP + 11;
@@ -103,6 +104,7 @@ UINT GetButtonCheck(HWND button) noexcept {
 
 struct ScanPayload {
     unsigned long long generation{};
+    ULONGLONG elapsedMs{};
     ScanResult result;
 };
 
@@ -150,6 +152,12 @@ struct AppState {
     std::wstring pendingUnlockError;
     std::wstring pendingForceUnlockDetails;
     std::wstring lastStatusDetails;
+    ULONGLONG lastScanDurationMs{};
+    int savedColumnWidths[4]{};
+    bool savedColumnsValid{};
+    bool columnsInitialized{};
+    int restoredWindowWidth{780};
+    int restoredWindowHeight{460};
     bool permanentDeleteDefault{};
     bool exiting{};
 };
@@ -204,6 +212,80 @@ bool SavePermanentDeleteDefault(bool enabled) {
     const std::wstring ini = GetPortableSettingsPath();
     return WritePrivateProfileStringW(L"Actions", L"PermanentDelete",
                                       enabled ? L"1" : L"0", ini.c_str()) != FALSE;
+}
+
+
+int ClampPreference(int value, int minimum, int maximum) {
+    return (std::max)(minimum, (std::min)(maximum, value));
+}
+
+void LoadLayoutPreferences(AppState& state) {
+    const std::wstring ini = GetPortableSettingsPath();
+    state.restoredWindowWidth = ClampPreference(
+        GetPrivateProfileIntW(L"Window", L"Width", 780, ini.c_str()), 720, 2400);
+    state.restoredWindowHeight = ClampPreference(
+        GetPrivateProfileIntW(L"Window", L"Height", 460, ini.c_str()), 400, 1800);
+
+    static constexpr const wchar_t* kColumnKeys[] = {
+        L"ProcessWidth", L"PidWidth", L"MethodWidth", L"ObjectWidth"
+    };
+    bool valid = true;
+    for (int i = 0; i < 4; ++i) {
+        state.savedColumnWidths[i] =
+            GetPrivateProfileIntW(L"Columns", kColumnKeys[i], 0, ini.c_str());
+        if (state.savedColumnWidths[i] < 40 || state.savedColumnWidths[i] > 2400) {
+            valid = false;
+        }
+    }
+    state.savedColumnsValid = valid;
+}
+
+void CaptureColumnWidths(AppState* state) {
+    if (!state || !state->list || state->dpi <= 0) return;
+    bool valid = true;
+    for (int i = 0; i < 4; ++i) {
+        const int physical = ListView_GetColumnWidth(state->list, i);
+        const int logical = MulDiv(physical, 96, state->dpi);
+        state->savedColumnWidths[i] = logical;
+        if (logical < 40 || logical > 2400) {
+            valid = false;
+        }
+    }
+    state->savedColumnsValid = valid;
+}
+
+void SaveLayoutPreferences(AppState* state) {
+    if (!state) return;
+    const std::wstring ini = GetPortableSettingsPath();
+
+    auto writeInt = [&](const wchar_t* section, const wchar_t* key, int value) {
+        wchar_t buffer[32]{};
+        _itow_s(value, buffer, 10);
+        WritePrivateProfileStringW(section, key, buffer, ini.c_str());
+    };
+
+    if (state->hwnd && IsWindow(state->hwnd)) {
+        WINDOWPLACEMENT placement{};
+        placement.length = sizeof(placement);
+        if (GetWindowPlacement(state->hwnd, &placement)) {
+            const RECT& rc = placement.rcNormalPosition;
+            const int dpi = state->dpi > 0 ? state->dpi : 96;
+            const int width = MulDiv(rc.right - rc.left, 96, dpi);
+            const int height = MulDiv(rc.bottom - rc.top, 96, dpi);
+            writeInt(L"Window", L"Width", ClampPreference(width, 720, 2400));
+            writeInt(L"Window", L"Height", ClampPreference(height, 400, 1800));
+        }
+    }
+
+    CaptureColumnWidths(state);
+    if (state->savedColumnsValid) {
+        static constexpr const wchar_t* kColumnKeys[] = {
+            L"ProcessWidth", L"PidWidth", L"MethodWidth", L"ObjectWidth"
+        };
+        for (int i = 0; i < 4; ++i) {
+            writeInt(L"Columns", kColumnKeys[i], state->savedColumnWidths[i]);
+        }
+    }
 }
 
 ParsedArgs ParseArguments() {
@@ -358,7 +440,17 @@ void ApplyFonts(AppState* state) {
 }
 
 void UpdateListColumns(AppState* state, int width) {
-    if (!state || !state->list || width <= 0) return;
+    if (!state || !state->list || width <= 0 || state->columnsInitialized) return;
+
+    if (state->savedColumnsValid) {
+        for (int i = 0; i < 4; ++i) {
+            ListView_SetColumnWidth(
+                state->list, i, MulDiv(state->savedColumnWidths[i], state->dpi, 96));
+        }
+        state->columnsInitialized = true;
+        return;
+    }
+
     const int usable = width - Scale(state, 6);
     const int processW = (std::max)(Scale(state, 138), usable * 24 / 100);
     const int pidW = (std::max)(Scale(state, 52), usable * 8 / 100);
@@ -368,6 +460,7 @@ void UpdateListColumns(AppState* state, int width) {
     ListView_SetColumnWidth(state->list, 1, pidW);
     ListView_SetColumnWidth(state->list, 2, detectedW);
     ListView_SetColumnWidth(state->list, 3, executableW);
+    state->columnsInitialized = true;
 }
 
 void UpdateTheme(AppState* state) {
@@ -983,7 +1076,9 @@ void StartScan(AppState* state) {
     std::thread([hwnd, generation, target]() {
         auto payload = std::make_unique<ScanPayload>();
         payload->generation = generation;
+        const ULONGLONG started = GetTickCount64();
         payload->result = ScanLocks(target);
+        payload->elapsedMs = GetTickCount64() - started;
         if (PostMessageW(hwnd, WM_APP_SCAN_DONE, 0, reinterpret_cast<LPARAM>(payload.get()))) {
             payload.release();
         }
@@ -2238,16 +2333,43 @@ bool HandlePendingActionAfterScan(AppState* state, const ScanResult& result) {
 
 std::wstring BuildCurrentDetails(const AppState* state) {
     if (!state) return {};
-    std::wstring text = state->lastStatusDetails;
-    if (!state->locks.empty()) {
-        if (!text.empty()) text += L"\n\n";
-        text += L"Detected blockers:";
+
+    std::wstring text = L"TARGET\n";
+    text += L"Path: " + (state->target.empty() ? std::wstring(L"(none)") : state->target);
+    text += L"\nType: ";
+    if (!state->lastTargetExists) {
+        text += L"(not available)";
+    } else {
+        text += state->lastTargetIsDirectory ? L"Directory" : L"File";
+    }
+
+    text += L"\n\nSCAN RESULT\n";
+    text += L"Status: " + (state->lastStatusDetails.empty()
+        ? std::wstring(L"No additional scan details are available.")
+        : state->lastStatusDetails);
+    text += L"\nDuration: " + std::to_wstring(state->lastScanDurationMs) + L" ms";
+    text += L"\nRestart Manager: ";
+    text += state->lastRestartManagerError == ERROR_SUCCESS
+        ? L"OK"
+        : ErrorMessage(state->lastRestartManagerError);
+    text += L"\nDisk handles inspected: " +
+        std::to_wstring(state->lastInspectedDiskHandleCount);
+    text += L"\nHandle type filter: ";
+    text += state->lastHandleTypeFilterAvailable
+        ? L"File ObjectTypeIndex detected"
+        : L"Unavailable / partial scan";
+    text += L"\nInaccessible file-handle owners (system-wide): " +
+        std::to_wstring(state->lastInaccessibleProcessCount);
+
+    text += L"\n\nBLOCKERS\n";
+    if (state->locks.empty()) {
+        text += L"None detected.";
+    } else {
+        text += std::to_wstring(state->locks.size()) +
+            (state->locks.size() == 1 ? L" process detected." : L" processes detected.");
         for (const auto& process : state->locks) {
             text += L"\n\n" + BuildProcessInfoText(process);
         }
-    }
-    if (text.empty()) {
-        text = L"No additional scan details are available.";
     }
     return text;
 }
@@ -2279,6 +2401,7 @@ std::wstring BuildDiagnosticReport(const AppState* state) {
         L"\r\nTarget exists: " + std::wstring(state->lastTargetExists ? L"Yes" : L"No") +
         L"\r\nTarget type: " + targetType +
         L"\r\nBlocking processes: " + std::to_wstring(state->locks.size()) +
+        L"\r\nScan duration: " + std::to_wstring(state->lastScanDurationMs) + L" ms" +
         L"\r\nDelete-share probe: " + deleteShare +
         L"\r\nRestart Manager: " +
             std::wstring(state->lastRestartManagerError == ERROR_SUCCESS
@@ -2874,6 +2997,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DPICHANGED:
         if (state) {
+            CaptureColumnWidths(state);
+            state->columnsInitialized = false;
             state->dpi = HIWORD(wParam);
             if (state->dpi <= 0) state->dpi = 96;
             RecreateFonts(state);
@@ -2960,6 +3085,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             const HWND listHeader = state->list ? ListView_GetHeader(state->list) : nullptr;
             if (header && listHeader && header->hwndFrom == listHeader &&
+                (header->code == HDN_ENDTRACKW || header->code == HDN_ENDTRACKA)) {
+                CaptureColumnWidths(state);
+                SaveLayoutPreferences(state);
+            }
+            if (header && listHeader && header->hwndFrom == listHeader &&
                 header->code == NM_CUSTOMDRAW) {
                 auto* custom = reinterpret_cast<NMCUSTOMDRAW*>(lParam);
                 if (custom->dwDrawStage == CDDS_PREPAINT) {
@@ -3042,6 +3172,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         ScanResult& result = payload->result;
         state->scanInProgress = false;
+        state->lastScanDurationMs = payload->elapsedMs;
         state->lastTargetExists = result.targetExists;
         state->lastTargetIsDirectory = result.targetIsDirectory;
         state->lastInaccessibleProcessCount = result.inaccessibleProcessCount;
@@ -3101,9 +3232,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     details += L"Native File ObjectTypeIndex filtering was unavailable, so handle-scan coverage is partial.";
                 }
                 if (details.empty()) {
-                    SetStatus(state, L"✓ No locking processes detected.");
+                    SetStatus(state, L"✓ No locking processes detected · " +
+                        std::to_wstring(state->lastScanDurationMs) + L" ms");
                 } else {
-                    SetStatusWithDetails(state, L"✓ No locking processes detected.", details);
+                    SetStatusWithDetails(state,
+                        L"✓ No locking processes detected · " +
+                            std::to_wstring(state->lastScanDurationMs) + L" ms",
+                        details);
                 }
             } else {
                 std::wstring details = L"No blocker was detected, but delete-share verification failed: " +
@@ -3115,7 +3250,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
         } else {
             std::wstring shortText = L"\u25CF " + std::to_wstring(state->locks.size()) +
-                (state->locks.size() == 1 ? L" locking process" : L" locking processes");
+                (state->locks.size() == 1 ? L" locking process" : L" locking processes") +
+                L" · " + std::to_wstring(state->lastScanDurationMs) + L" ms";
             size_t lockedObjectCount = 0;
             for (const auto& process : state->locks) {
                 lockedObjectCount += process.lockedObjects.size();
@@ -3163,6 +3299,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DESTROY:
         if (state) {
+            SaveLayoutPreferences(state);
             if (state->detailsWindow && IsWindow(state->detailsWindow)) {
                 DestroyWindow(state->detailsWindow);
                 state->detailsWindow = nullptr;
@@ -3331,6 +3468,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
     AppState state;
     state.permanentDeleteDefault = LoadPermanentDeleteDefault();
+    LoadLayoutPreferences(state);
     state.icon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
                                                0, 0, LR_DEFAULTSIZE));
     if (!state.icon) {
@@ -3353,9 +3491,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         return 1;
     }
 
+    const int startupDpi = GetDpiForSystem() > 0 ? static_cast<int>(GetDpiForSystem()) : 96;
+    const int startupWidth = MulDiv(state.restoredWindowWidth, startupDpi, 96);
+    const int startupHeight = MulDiv(state.restoredWindowHeight, startupDpi, 96);
     HWND hwnd = CreateWindowExW(0, kWindowClass, kWindowTitle,
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-        CW_USEDEFAULT, CW_USEDEFAULT, 780, 460,
+        CW_USEDEFAULT, CW_USEDEFAULT, startupWidth, startupHeight,
         nullptr, nullptr, instance, &state);
     if (!hwnd) {
         if (mutex) CloseHandle(mutex);
