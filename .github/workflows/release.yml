@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build portable x64
+        shell: cmd
+        run: >
+          msbuild GeniaUnlocker.sln
+          /m
+          /t:Rebuild
+          /p:Configuration=Portable
+          /p:Platform=x64
+          /p:PlatformToolset=v143
+
+      - name: Verify version and package
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $exe = Join-Path $PWD "dist\GeniaUnlocker.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "dist\GeniaUnlocker.exe was not produced."
+          }
+
+          $version = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
+          if ($version -ne "0.5.0.7") {
+            throw "Unexpected FileVersion: $version"
+          }
+
+          $stage = Join-Path $PWD "release-stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $stage "GeniaUnlocker.exe")
+          Copy-Item -LiteralPath "README.md" -Destination $stage
+          Copy-Item -LiteralPath "CHANGELOG.md" -Destination $stage
+          Copy-Item -LiteralPath "RELEASE-NOTES.md" -Destination $stage
+          Copy-Item -LiteralPath "LICENSE" -Destination $stage
+
+          $zip = Join-Path $PWD "Genia-Unlocker-v0.5.0-Windows-x64-Portable.zip"
+          if (Test-Path -LiteralPath $zip) {
+            Remove-Item -LiteralPath $zip -Force
+          }
+
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal
+
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash
+          $hashFile = Join-Path $PWD "Genia-Unlocker-v0.5.0-Windows-x64-Portable-SHA256.txt"
+          Set-Content -LiteralPath $hashFile -Value "$hash  Genia-Unlocker-v0.5.0-Windows-x64-Portable.zip" -Encoding ascii
+
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "hash=$hashFile" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Genia-Unlocker-v0.5.0-Windows-x64-Portable
+          path: |
+            Genia-Unlocker-v0.5.0-Windows-x64-Portable.zip
+            Genia-Unlocker-v0.5.0-Windows-x64-Portable-SHA256.txt
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Genia Unlocker v0.5.0 Final
+          body_path: RELEASE-NOTES.md
+          files: |
+            Genia-Unlocker-v0.5.0-Windows-x64-Portable.zip
+            Genia-Unlocker-v0.5.0-Windows-x64-Portable-SHA256.txt
+          generate_release_notes: false
