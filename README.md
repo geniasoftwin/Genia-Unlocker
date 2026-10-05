@@ -1,24 +1,23 @@
-# Genia Unlocker 0.5.0 — Preview 4
+# Genia Unlocker 0.5.0 — Preview 4.1
 
 A lightweight native Windows file/folder unlocker built for **Visual Studio 2026**, x64 and the current Windows 11 SDK.
 
-## v0.5.0 Preview 4 — Flat UX
+## v0.5.0 Preview 4.1 — Flat UX polish
 
-Preview 4 is a visual refresh that keeps the existing native Win32 architecture and safety model.
+Preview 4.1 refines the Flat UX introduced in Preview 4 without changing scanner or unlock behavior.
 
-New in Preview 4:
-- new Flat UX palette for both dark and light Windows themes;
-- solid window surfaces instead of the previous Mica-style backdrop;
-- smaller Windows 11 corner radius and low-contrast one-pixel separators;
-- flatter owner-drawn buttons with compact radii and quieter secondary actions;
-- destructive actions use a red outline instead of a permanently filled red block;
-- tighter main-window spacing and more compact toolbar sizing;
-- flatter Target, process-list and Details fields without the classic sunken client-edge look;
-- simplified flat warning mark in confirmation dialogs;
-- slightly lighter typography hierarchy across the main window and tool windows;
-- executable metadata updated to GeniaSoftWin / 0.5.0.4.
+New in Preview 4.1:
+- reliable custom flat header rendering for the process table in both dark and light themes;
+- dark-mode Details text surface now follows the application palette instead of remaining white;
+- native Windows caption color is aligned with the Flat UX background;
+- light theme has clearer separation between window and content surfaces;
+- secondary buttons are more visible while staying flat;
+- disabled controls have slightly stronger readable contrast;
+- About footer spacing was tightened and balanced;
+- Windows 11 tray hover tooltip is explicitly restored with NIF_SHOWTIP;
+- executable metadata updated to GeniaSoftWin / 0.5.0.5.
 
-Preview 3 added themed confirmations, scan timing, structured Details, portable layout persistence and DPI hardening.
+Preview 4 introduced the new Flat UX palette, solid surfaces, tighter layout and quieter destructive-action styling.
 
 ## Portable policy
 
