@@ -1,23 +1,24 @@
-# Genia Unlocker 0.5.0 — Preview 4.1
+# Genia Unlocker 0.5.0 — RC1
 
 A lightweight native Windows file/folder unlocker built for **Visual Studio 2026**, x64 and the current Windows 11 SDK.
 
-## v0.5.0 Preview 4.1 — Flat UX polish
+## v0.5.0 RC1
 
-Preview 4.1 refines the Flat UX introduced in Preview 4 without changing scanner or unlock behavior.
+RC1 freezes the v0.5.0 feature/UI set for final regression testing. No new features are planned before Final unless testing finds a blocker.
 
-New in Preview 4.1:
-- reliable custom flat header rendering for the process table in both dark and light themes;
-- dark-mode Details text surface now follows the application palette instead of remaining white;
-- native Windows caption color is aligned with the Flat UX background;
-- light theme has clearer separation between window and content surfaces;
-- secondary buttons are more visible while staying flat;
-- disabled controls have slightly stronger readable contrast;
-- About footer spacing was tightened and balanced;
-- Windows 11 tray hover tooltip is explicitly restored with NIF_SHOWTIP;
-- executable metadata updated to GeniaSoftWin / 0.5.0.5.
+Highlights since v0.4.1 Final:
+- fixed native file-handle type detection and improved Restart Manager retries;
+- verified Microsoft Word locking scenarios and target-level delete-share state;
+- unrelated inaccessible system handles no longer decide whether the selected target is clean;
+- Flat UX for dark/light themes, including themed About, Details and confirmation windows;
+- adaptive small-size application icon and fixed Windows 11 tray hover tooltip;
+- diagnostic reports with scan timing and clearer scan coverage;
+- context-sensitive Delete / Unlock & Delete action;
+- portable persistence for main-window size and table-column widths;
+- per-monitor DPI hardening;
+- executable metadata updated to GeniaSoftWin / 0.5.0.6.
 
-Preview 4 introduced the new Flat UX palette, solid surfaces, tighter layout and quieter destructive-action styling.
+See `docs/FINAL-TEST-CHECKLIST-v0.5.0.md` for the RC acceptance pass.
 
 ## Portable policy
 
