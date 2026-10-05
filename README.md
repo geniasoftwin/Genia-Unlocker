@@ -1,24 +1,24 @@
-# Genia Unlocker 0.5.0 — RC1
+# Genia Unlocker 0.5.0 — Final
 
 A lightweight native Windows file/folder unlocker built for **Visual Studio 2026**, x64 and the current Windows 11 SDK.
 
-## v0.5.0 RC1
+## v0.5.0 Final
 
-RC1 freezes the v0.5.0 feature/UI set for final regression testing. No new features are planned before Final unless testing finds a blocker.
+v0.5.0 Final is promoted from the Windows-tested RC1 codebase. The finalization changes only version/release metadata and packaging; scanner, unlock and delete logic remain unchanged from RC1.
 
 Highlights since v0.4.1 Final:
-- fixed native file-handle type detection and improved Restart Manager retries;
-- verified Microsoft Word locking scenarios and target-level delete-share state;
+- fixed native File ObjectTypeIndex detection and strengthened Restart Manager retries;
+- verified Microsoft Word / Office locking scenarios and target-level delete-share state;
 - unrelated inaccessible system handles no longer decide whether the selected target is clean;
-- Flat UX for dark/light themes, including themed About, Details and confirmation windows;
-- adaptive small-size application icon and fixed Windows 11 tray hover tooltip;
+- new Flat UX for dark/light themes, including themed About, Details and confirmation windows;
+- adaptive small-size application icon and reliable Windows 11 tray hover tooltip;
 - diagnostic reports with scan timing and clearer scan coverage;
 - context-sensitive Delete / Unlock & Delete action;
 - portable persistence for main-window size and table-column widths;
 - per-monitor DPI hardening;
-- executable metadata updated to GeniaSoftWin / 0.5.0.6.
+- executable metadata: FileVersion **0.5.0.7**, ProductVersion **0.5.0 Final**.
 
-See `docs/FINAL-TEST-CHECKLIST-v0.5.0.md` for the RC acceptance pass.
+RC1 was accepted after real Windows testing of Word/Office locks, normal Unlock, Force Unlock, Terminate, Delete/Unlock & Delete, tray behavior and dark/light Flat UX.
 
 ## Portable policy
 
