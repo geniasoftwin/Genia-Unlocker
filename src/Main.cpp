@@ -1043,7 +1043,7 @@ LRESULT CALLBACK ConfirmWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
 
         confirm->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-        confirm->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
+        confirm->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
         RECT rc{};
         GetClientRect(hwnd, &rc);
@@ -1205,7 +1205,7 @@ LRESULT CALLBACK ConfirmWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (confirm->font) DeleteObject(confirm->font);
             if (confirm->titleFont) DeleteObject(confirm->titleFont);
             confirm->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-            confirm->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
+            confirm->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
             MoveWindow(confirm->closeButton, rc.right - sc(32), sc(5), sc(24), sc(22), TRUE);
             const int buttonY = rc.bottom - sc(46);
@@ -1609,7 +1609,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
 
         settings->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-        settings->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
+        settings->titleFont = CreateModernFont(dpi, 14, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
         // Compact custom caption for the Settings tool window.  The native
         // caption always places its Close button flush against the right frame;
@@ -1787,7 +1787,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (settings->font) DeleteObject(settings->font);
             if (settings->titleFont) DeleteObject(settings->titleFont);
             settings->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-            settings->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
+            settings->titleFont = CreateModernFont(dpi, 14, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
             MoveWindow(settings->closeButton, sc(368), sc(5), sc(24), sc(22), TRUE);
             MoveWindow(GetDlgItem(hwnd, IDC_SETTINGS_TITLE), sc(16), sc(42), sc(330), sc(28), TRUE);
@@ -2942,7 +2942,7 @@ LRESULT CALLBACK DetailsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
 
         details->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-        details->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
+        details->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
         details->closeButton = CreateWindowW(
             L"BUTTON", L"×",
@@ -3089,7 +3089,7 @@ LRESULT CALLBACK DetailsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (details->font) DeleteObject(details->font);
             if (details->titleFont) DeleteObject(details->titleFont);
             details->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-            details->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
+            details->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
             MoveWindow(details->closeButton, sc(548), sc(5), sc(24), sc(22), TRUE);
             MoveWindow(details->edit, sc(16), sc(58), sc(556), sc(260), TRUE);
