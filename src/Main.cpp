@@ -1540,13 +1540,27 @@ void AddTrayIcon(AppState* state) {
     state->tray.cbSize = sizeof(state->tray);
     state->tray.hWnd = state->hwnd;
     state->tray.uID = 1;
-    state->tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+
+    // With NOTIFYICON_VERSION_4 Windows can suppress the classic szTip text
+    // unless NIF_SHOWTIP is explicitly requested. Without it, Windows 11 may
+    // still create the hover bubble but leave the content area empty.
+    state->tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     state->tray.uCallbackMessage = WM_APP_TRAY;
     state->tray.hIcon = state->icon;
     wcscpy_s(state->tray.szTip, L"Genia Unlocker");
-    Shell_NotifyIconW(NIM_ADD, &state->tray);
+
+    if (!Shell_NotifyIconW(NIM_ADD, &state->tray)) {
+        return;
+    }
+
     state->tray.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &state->tray);
+
+    // Reassert the tooltip after switching to version 4. Explorer can recreate
+    // the notification area independently (TaskbarCreated), so AddTrayIcon is
+    // also the single source of truth for restoring hover text.
+    state->tray.uFlags = NIF_TIP | NIF_SHOWTIP;
+    Shell_NotifyIconW(NIM_MODIFY, &state->tray);
 }
 
 void RemoveTrayIcon(AppState* state) {
