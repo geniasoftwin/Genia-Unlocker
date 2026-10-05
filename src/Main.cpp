@@ -34,7 +34,7 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"GeniaUnlockerWindow";
 constexpr wchar_t kWindowTitle[] = L"Genia Unlocker";
-constexpr wchar_t kAppVersionDisplay[] = L"0.5.0 Preview 3";
+constexpr wchar_t kAppVersionDisplay[] = L"0.5.0 Preview 4";
 constexpr wchar_t kRepositoryUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker";
 constexpr wchar_t kIssuesUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker/issues/new";
 constexpr wchar_t kSettingsWindowClass[] = L"GeniaUnlockerSettingsWindow";
@@ -431,7 +431,7 @@ void RecreateFonts(AppState* state) {
     if (state->titleFont) DeleteObject(state->titleFont);
 
     state->font = CreateModernFont(state->dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-    state->titleFont = CreateModernFont(state->dpi, 15, FW_SEMIBOLD, L"Segoe UI Variable Display");
+    state->titleFont = CreateModernFont(state->dpi, 14, FW_SEMIBOLD, L"Segoe UI Variable Display");
 }
 
 void ApplyFonts(AppState* state) {
@@ -685,7 +685,7 @@ LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
 
         about->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-        about->titleFont = CreateModernFont(dpi, 16, FW_SEMIBOLD, L"Segoe UI Variable Display");
+        about->titleFont = CreateModernFont(dpi, 15, FW_SEMIBOLD, L"Segoe UI Variable Display");
         about->versionFont = CreateModernFont(dpi, 9, FW_SEMIBOLD, L"Segoe UI Variable Text");
 
         about->closeButton = CreateWindowW(
@@ -880,7 +880,7 @@ LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (about->titleFont) DeleteObject(about->titleFont);
             if (about->versionFont) DeleteObject(about->versionFont);
             about->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-            about->titleFont = CreateModernFont(dpi, 16, FW_SEMIBOLD, L"Segoe UI Variable Display");
+            about->titleFont = CreateModernFont(dpi, 15, FW_SEMIBOLD, L"Segoe UI Variable Display");
             about->versionFont = CreateModernFont(dpi, 9, FW_SEMIBOLD, L"Segoe UI Variable Text");
 
             MoveWindow(about->closeButton, sc(408), sc(5), sc(24), sc(22), TRUE);
@@ -1043,7 +1043,7 @@ LRESULT CALLBACK ConfirmWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
 
         confirm->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-        confirm->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
+        confirm->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
         RECT rc{};
         GetClientRect(hwnd, &rc);
@@ -1103,10 +1103,25 @@ LRESULT CALLBACK ConfirmWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             if (oldFont) SelectObject(dc, oldFont);
 
-            HICON warning = LoadIconW(nullptr, IDI_WARNING);
-            if (warning) {
-                DrawIconEx(dc, sc(18), sc(47), warning, sc(30), sc(30), 0, nullptr, DI_NORMAL);
-            }
+            // Flat warning mark: no stock 3-D system icon, just a compact
+            // outlined status circle using the same palette as destructive actions.
+            HPEN warningPen = CreatePen(PS_SOLID, (std::max)(1, sc(1)), app->palette.danger);
+            HGDIOBJ oldWarningPen = SelectObject(dc, warningPen);
+            HGDIOBJ oldWarningBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            Ellipse(dc, sc(18), sc(47), sc(48), sc(77));
+            SelectObject(dc, oldWarningBrush);
+            SelectObject(dc, oldWarningPen);
+            DeleteObject(warningPen);
+
+            RECT warningTextRc{sc(18), sc(47), sc(48), sc(77)};
+            HFONT warningFont = CreateModernFont(dpi, 13, FW_BOLD, L"Segoe UI Variable Display");
+            oldFont = warningFont ? SelectObject(dc, warningFont) : nullptr;
+            SetTextColor(dc, app->palette.danger);
+            DrawTextW(dc, L"!", -1, &warningTextRc,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (oldFont) SelectObject(dc, oldFont);
+            if (warningFont) DeleteObject(warningFont);
+            SetTextColor(dc, app->palette.text);
 
             oldFont = confirm->titleFont ? SelectObject(dc, confirm->titleFont) : nullptr;
             RECT titleRc{sc(62), sc(44), rc.right - sc(18), sc(79)};
@@ -1190,7 +1205,7 @@ LRESULT CALLBACK ConfirmWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (confirm->font) DeleteObject(confirm->font);
             if (confirm->titleFont) DeleteObject(confirm->titleFont);
             confirm->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-            confirm->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
+            confirm->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
             MoveWindow(confirm->closeButton, rc.right - sc(32), sc(5), sc(24), sc(22), TRUE);
             const int buttonY = rc.bottom - sc(46);
@@ -1594,7 +1609,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
 
         settings->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-        settings->titleFont = CreateModernFont(dpi, 15, FW_SEMIBOLD, L"Segoe UI Variable Display");
+        settings->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
         // Compact custom caption for the Settings tool window.  The native
         // caption always places its Close button flush against the right frame;
@@ -1772,7 +1787,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (settings->font) DeleteObject(settings->font);
             if (settings->titleFont) DeleteObject(settings->titleFont);
             settings->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-            settings->titleFont = CreateModernFont(dpi, 15, FW_SEMIBOLD, L"Segoe UI Variable Display");
+            settings->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
             MoveWindow(settings->closeButton, sc(368), sc(5), sc(24), sc(22), TRUE);
             MoveWindow(GetDlgItem(hwnd, IDC_SETTINGS_TITLE), sc(16), sc(42), sc(330), sc(28), TRUE);
@@ -2927,7 +2942,7 @@ LRESULT CALLBACK DetailsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
 
         details->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-        details->titleFont = CreateModernFont(dpi, 14, FW_SEMIBOLD, L"Segoe UI Variable Display");
+        details->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
         details->closeButton = CreateWindowW(
             L"BUTTON", L"×",
@@ -2936,8 +2951,8 @@ LRESULT CALLBACK DetailsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             ControlId(IDC_DETAILS_CLOSE), nullptr, nullptr);
 
         details->edit = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", ToEditText(details->detailsText).c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+            0, L"EDIT", ToEditText(details->detailsText).c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_BORDER |
             ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
             sc(16), sc(58), sc(556), sc(260), hwnd,
             ControlId(IDC_DETAILS_EDIT), nullptr, nullptr);
@@ -3074,7 +3089,7 @@ LRESULT CALLBACK DetailsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (details->font) DeleteObject(details->font);
             if (details->titleFont) DeleteObject(details->titleFont);
             details->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-            details->titleFont = CreateModernFont(dpi, 14, FW_SEMIBOLD, L"Segoe UI Variable Display");
+            details->titleFont = CreateModernFont(dpi, 12, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
             MoveWindow(details->closeButton, sc(548), sc(5), sc(24), sc(22), TRUE);
             MoveWindow(details->edit, sc(16), sc(58), sc(556), sc(260), TRUE);
@@ -3213,23 +3228,25 @@ void ShowDetailsWindow(AppState* state) {
 }
 
 void LayoutControls(AppState* state, int width, int height) {
-    const int margin = Scale(state, 14);
-    const int gap = Scale(state, 7);
-    const int buttonH = Scale(state, 30);
-    const int chooseFileW = Scale(state, 78);
-    const int chooseFolderW = Scale(state, 86);
-    const int settingsW = Scale(state, 88);
+    // Flat UX uses tighter rhythm and lets whitespace, rather than raised
+    // containers, separate the title, target, process list and actions.
+    const int margin = Scale(state, 12);
+    const int gap = Scale(state, 6);
+    const int buttonH = Scale(state, 28);
+    const int chooseFileW = Scale(state, 72);
+    const int chooseFolderW = Scale(state, 80);
+    const int settingsW = Scale(state, 78);
 
-    int y = Scale(state, 10);
+    int y = Scale(state, 9);
     MoveWindow(GetDlgItem(state->hwnd, IDC_APP_TITLE), margin, y,
-               width - margin * 2 - settingsW - gap, Scale(state, 26), TRUE);
+               width - margin * 2 - settingsW - gap, Scale(state, 24), TRUE);
     MoveWindow(GetDlgItem(state->hwnd, IDC_SETTINGS), width - margin - settingsW, y,
-               settingsW, Scale(state, 26), TRUE);
+               settingsW, Scale(state, 24), TRUE);
 
-    y += Scale(state, 32);
+    y += Scale(state, 29);
     MoveWindow(GetDlgItem(state->hwnd, IDC_TARGET_LABEL), margin, y,
-               Scale(state, 86), Scale(state, 16), TRUE);
-    y += Scale(state, 17);
+               Scale(state, 80), Scale(state, 15), TRUE);
+    y += Scale(state, 16);
 
     int targetW = width - margin * 2 - chooseFileW - chooseFolderW - gap * 2;
     if (targetW < Scale(state, 210)) targetW = Scale(state, 210);
@@ -3241,20 +3258,20 @@ void LayoutControls(AppState* state, int width, int height) {
                margin + targetW + gap + chooseFileW + gap, y,
                chooseFolderW, buttonH, TRUE);
 
-    const int listTop = y + buttonH + Scale(state, 8);
-    const int bottomArea = Scale(state, 72);
+    const int listTop = y + buttonH + Scale(state, 7);
+    const int bottomArea = Scale(state, 66);
     int listHeight = height - listTop - bottomArea;
-    if (listHeight < Scale(state, 150)) listHeight = Scale(state, 150);
+    if (listHeight < Scale(state, 145)) listHeight = Scale(state, 145);
     const int listW = width - margin * 2;
     MoveWindow(state->list, margin, listTop, listW, listHeight, TRUE);
     UpdateListColumns(state, listW);
 
-    const int actionsY = listTop + listHeight + Scale(state, 7);
-    const int unlockW = Scale(state, 74);
-    const int forceW = Scale(state, 96);
-    const int terminateW = Scale(state, 84);
-    const int destructiveW = Scale(state, 120);
-    const int retryW = Scale(state, 92);
+    const int actionsY = listTop + listHeight + Scale(state, 6);
+    const int unlockW = Scale(state, 70);
+    const int forceW = Scale(state, 92);
+    const int terminateW = Scale(state, 80);
+    const int destructiveW = Scale(state, 114);
+    const int retryW = Scale(state, 88);
 
     int actionX = margin;
     MoveWindow(GetDlgItem(state->hwnd, IDC_UNLOCK), actionX, actionsY,
@@ -3274,11 +3291,11 @@ void LayoutControls(AppState* state, int width, int height) {
                retryW, buttonH, TRUE);
 
     const int statusY = actionsY + buttonH + Scale(state, 5);
-    const int detailsW = Scale(state, 66);
+    const int detailsW = Scale(state, 60);
     MoveWindow(state->status, margin, statusY,
-               width - margin * 2 - detailsW - gap, Scale(state, 18), TRUE);
+               width - margin * 2 - detailsW - gap, Scale(state, 17), TRUE);
     MoveWindow(GetDlgItem(state->hwnd, IDC_DETAILS), width - margin - detailsW,
-               statusY - Scale(state, 2), detailsW, Scale(state, 22), TRUE);
+               statusY - Scale(state, 2), detailsW, Scale(state, 21), TRUE);
 }
 
 void CreateControls(AppState* state) {
@@ -3289,15 +3306,16 @@ void CreateControls(AppState* state) {
     CreateWindowW(L"STATIC", L"Genia Unlocker",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_APP_TITLE), nullptr, nullptr);
-    CreateWindowW(L"BUTTON", L"⚙ Settings",
+    CreateWindowW(L"BUTTON", L"Settings",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_SETTINGS), nullptr, nullptr);
     CreateWindowW(L"STATIC", L"Target",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_TARGET_LABEL), nullptr, nullptr);
 
-    state->targetEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOHSCROLL | ES_READONLY,
+    state->targetEdit = CreateWindowExW(0, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER |
+        ES_MULTILINE | ES_AUTOHSCROLL | ES_READONLY,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_TARGET), nullptr, nullptr);
 
     state->targetTooltip = CreateWindowExW(
@@ -3321,8 +3339,9 @@ void CreateControls(AppState* state) {
     CreateWindowW(L"BUTTON", L"Folder...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_FOLDER), nullptr, nullptr);
 
-    state->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+    state->list = CreateWindowExW(0, WC_LISTVIEWW, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER |
+        LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_LIST), nullptr, nullptr);
     ListView_SetExtendedListViewStyle(state->list,
         LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP | LVS_EX_INFOTIP | LVS_EX_HEADERDRAGDROP);
@@ -3448,8 +3467,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_GETMINMAXINFO:
         if (state) {
             auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
-            info->ptMinTrackSize.x = Scale(state, 720);
-            info->ptMinTrackSize.y = Scale(state, 400);
+            info->ptMinTrackSize.x = Scale(state, 700);
+            info->ptMinTrackSize.y = Scale(state, 380);
             return 0;
         }
         break;
