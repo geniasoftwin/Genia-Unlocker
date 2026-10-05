@@ -34,7 +34,7 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"GeniaUnlockerWindow";
 constexpr wchar_t kWindowTitle[] = L"Genia Unlocker";
-constexpr wchar_t kAppVersionDisplay[] = L"0.5.0 Preview 4";
+constexpr wchar_t kAppVersionDisplay[] = L"0.5.0 Preview 4.1";
 constexpr wchar_t kRepositoryUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker";
 constexpr wchar_t kIssuesUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker/issues/new";
 constexpr wchar_t kSettingsWindowClass[] = L"GeniaUnlockerSettingsWindow";
@@ -444,6 +444,106 @@ void ApplyFonts(AppState* state) {
     SetFont(GetDlgItem(state->hwnd, IDC_APP_TITLE), state->titleFont);
 }
 
+
+LRESULT CALLBACK FlatHeaderSubclassProc(HWND hwnd,
+                                        UINT msg,
+                                        WPARAM wParam,
+                                        LPARAM lParam,
+                                        UINT_PTR subclassId,
+                                        DWORD_PTR refData) {
+    auto* state = reinterpret_cast<AppState*>(refData);
+
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT:
+        if (state) {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+
+            ModernTheme::Palette palette = state->palette;
+            if (palette.text == 0) {
+                palette = ModernTheme::QueryPalette();
+            }
+
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            const COLORREF headerFill = palette.dark ? palette.surface : palette.window;
+            HBRUSH background = CreateSolidBrush(headerFill);
+            FillRect(dc, &client, background);
+            DeleteObject(background);
+
+            const int count = Header_GetItemCount(hwnd);
+            HFONT font = state->font
+                ? state->font
+                : reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
+            HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, palette.text);
+
+            HPEN separator = CreatePen(PS_SOLID, 1, palette.border);
+            HGDIOBJ oldPen = SelectObject(dc, separator);
+
+            for (int i = 0; i < count; ++i) {
+                RECT itemRc{};
+                if (!Header_GetItemRect(hwnd, i, &itemRc)) {
+                    continue;
+                }
+
+                wchar_t textBuffer[256]{};
+                HDITEMW item{};
+                item.mask = HDI_TEXT | HDI_FORMAT;
+                item.pszText = textBuffer;
+                item.cchTextMax = static_cast<int>(_countof(textBuffer));
+                Header_GetItem(hwnd, i, &item);
+
+                HBRUSH itemBrush = CreateSolidBrush(headerFill);
+                FillRect(dc, &itemRc, itemBrush);
+                DeleteObject(itemBrush);
+
+                MoveToEx(dc, itemRc.right - 1, itemRc.top, nullptr);
+                LineTo(dc, itemRc.right - 1, itemRc.bottom);
+                MoveToEx(dc, itemRc.left, itemRc.bottom - 1, nullptr);
+                LineTo(dc, itemRc.right, itemRc.bottom - 1);
+
+                RECT textRc = itemRc;
+                textRc.left += Scale(state, 7);
+                textRc.right -= Scale(state, 6);
+
+                UINT format = DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS;
+                if ((item.fmt & HDF_RIGHT) != 0) {
+                    format |= DT_RIGHT;
+                } else if ((item.fmt & HDF_CENTER) != 0) {
+                    format |= DT_CENTER;
+                } else {
+                    format |= DT_LEFT;
+                }
+                DrawTextW(dc, textBuffer, -1, &textRc, format);
+            }
+
+            SelectObject(dc, oldPen);
+            DeleteObject(separator);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        break;
+
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, FlatHeaderSubclassProc, subclassId);
+        break;
+    }
+
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 void UpdateListColumns(AppState* state, int width) {
     if (!state || !state->list || width <= 0 || state->columnsInitialized) return;
 
@@ -481,11 +581,16 @@ void UpdateTheme(AppState* state) {
     for (int id : {IDC_TARGET, IDC_LIST}) {
         ModernTheme::ApplyControlTheme(GetDlgItem(state->hwnd, id), state->palette.dark);
     }
-    ModernTheme::ApplyControlTheme(ListView_GetHeader(state->list), state->palette.dark);
+    HWND header = ListView_GetHeader(state->list);
+    ModernTheme::ApplyControlTheme(header, state->palette.dark);
 
     ListView_SetBkColor(state->list, state->palette.surface);
     ListView_SetTextBkColor(state->list, state->palette.surface);
     ListView_SetTextColor(state->list, state->palette.text);
+    if (header) {
+        InvalidateRect(header, nullptr, TRUE);
+        UpdateWindow(header);
+    }
 
     RedrawWindow(state->hwnd, nullptr, nullptr,
                  RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
@@ -785,11 +890,11 @@ LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             DrawTextW(dc, meta, -1, &metaRc, DT_LEFT | DT_TOP);
 
             SetTextColor(dc, app->palette.muted);
-            RECT sourceRc{sc(18), sc(203), rc.right - sc(18), sc(224)};
+            RECT sourceRc{sc(18), sc(201), rc.right - sc(18), sc(222)};
             DrawTextW(dc, L"Source: github.com/geniasoftwin/Genia-Unlocker",
                       -1, &sourceRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-            RECT copyrightRc{sc(18), sc(224), rc.right - sc(18), sc(242)};
+            RECT copyrightRc{sc(18), sc(220), rc.right - sc(18), sc(236)};
             DrawTextW(dc, L"Copyright © 2026 GeniaSoftWin",
                       -1, &copyrightRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -797,8 +902,8 @@ LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
             HPEN pen = CreatePen(PS_SOLID, 1, app->palette.border);
             HGDIOBJ oldPen = SelectObject(dc, pen);
-            MoveToEx(dc, sc(16), sc(241), nullptr);
-            LineTo(dc, rc.right - sc(16), sc(241));
+            MoveToEx(dc, sc(16), sc(242), nullptr);
+            LineTo(dc, rc.right - sc(16), sc(242));
             SelectObject(dc, oldPen);
             DeleteObject(pen);
 
@@ -3031,6 +3136,21 @@ LRESULT CALLBACK DetailsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         }
         break;
 
+    case WM_CTLCOLORSTATIC:
+        if (app) {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            HWND control = reinterpret_cast<HWND>(lParam);
+            if (control && GetDlgCtrlID(control) == IDC_DETAILS_EDIT) {
+                SetTextColor(dc, app->palette.text);
+                SetBkColor(dc, app->palette.surface);
+                return reinterpret_cast<LRESULT>(app->surfaceBrush);
+            }
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+            return reinterpret_cast<LRESULT>(app->windowBrush);
+        }
+        break;
+
     case WM_CTLCOLOREDIT:
         if (app) {
             HDC dc = reinterpret_cast<HDC>(wParam);
@@ -3371,6 +3491,11 @@ void CreateControls(AppState* state) {
         col.cx = Scale(state, columns[i].width);
         col.iSubItem = i;
         ListView_InsertColumn(state->list, i, &col);
+    }
+
+    if (HWND header = ListView_GetHeader(state->list)) {
+        SetWindowSubclass(header, FlatHeaderSubclassProc, 1,
+                          reinterpret_cast<DWORD_PTR>(state));
     }
 
     CreateWindowW(L"BUTTON", L"Unlock", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
