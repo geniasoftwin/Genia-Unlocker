@@ -1,40 +1,50 @@
-# Genia Unlocker v0.4.1 Final
+# Genia Unlocker v0.5.0 Final
 
-**Release date:** 2026-09-06  
+**Release date:** 2026-10-05  
 **Platform:** Windows 11 / x64  
-**Build:** Native Win32, portable, static MSVC runtime (`/MT`)  
-**Executable metadata:** 0.4.1.0
+**Build:** Native Win32 C++, portable, static MSVC runtime (`/MT`)  
+**Executable metadata:** FileVersion 0.5.0.7 / ProductVersion 0.5.0 Final
 
 ## Release decision
 
-v0.4.1 Final is promoted directly from the tested RC2 codebase. No application-code changes were introduced after the successful release-candidate stress test.
+v0.5.0 Final is promoted from the Windows-tested RC1 codebase. Functional scanner, unlock and delete logic is unchanged after RC1 acceptance; Final only changes release/version metadata and packaging.
 
-The validated stress path included multiple lock scenarios, elevation through UAC/administrator restart, and deletion of a locked folder.
+The RC pass included real Microsoft Word/Excel/Access lock scenarios, normal Unlock, Force Unlock, Terminate, Delete / Unlock & Delete, tray tooltip behavior and Flat UX checks.
 
-## Key fixes
+## Highlights
 
-- Reliable `Unlock & Delete` final stage.
-- Real post-delete verification.
-- Correct foreground activation when invoked from Explorer.
-- Correct 0.4.1.0 file/product version metadata.
-- Compact Settings close button with a DPI-aware inset.
+- New Flat UX for dark and light Windows themes.
+- Themed Settings, About, Details and confirmation windows.
+- Correct Microsoft Word / Office lock detection through Restart Manager/native scanning.
+- Fixed File ObjectTypeIndex detection in the native handle scanner.
+- Target-level delete-share verification.
+- System-wide inaccessible handles no longer falsely mark the selected target as locked.
+- Scan duration and clearer diagnostics.
+- Context-sensitive Delete / Unlock & Delete.
+- Adaptive Explorer/tray/context-menu icon.
+- Portable window-size and table-column persistence.
+- Windows 11 tray tooltip fix.
+- Per-monitor DPI hardening.
+
+## Force Unlock behavior
+
+Force Unlock closes only matching file handles when possible. The owning application remains running; after a clean rescan the released file can be renamed or deleted without terminating the whole process.
 
 ## Portable package
 
-After building, run:
+The release ZIP contains:
+- `GeniaUnlocker.exe`
+- `README.md`
+- `CHANGELOG.md`
+- `RELEASE-NOTES.md`
+- `LICENSE`
 
-```text
-package-release.cmd
-```
+No installer, service, driver, .NET runtime, Qt, WebView2 or helper DLL is required.
 
-It creates the end-user portable ZIP under:
+## SmartScreen / signing
 
-```text
-release\Genia-Unlocker-v0.4.1-Windows-x64-Portable.zip
-```
-
-The distributable contains only the executable and release documentation. `GeniaUnlocker.ini` is created beside the EXE only when a portable preference is changed.
+The current build is unsigned. Windows SmartScreen can therefore show an unknown-reputation warning on newly downloaded copies. This is separate from the functional release acceptance and can be addressed later with trusted Authenticode code signing.
 
 ## Scope
 
-Genia Unlocker remains a user-mode utility and does not install a kernel driver, service, .NET runtime, Qt or WebView2. Protected-process, kernel/minifilter, antivirus or unusual filesystem locks can still require operating-system-level handling.
+Genia Unlocker remains a user-mode utility. Protected-process, kernel/minifilter, antivirus or unusual filesystem locks can still require operating-system-level handling.
