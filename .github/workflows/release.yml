@@ -42,7 +42,7 @@ jobs:
           }
 
           $version = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
-          if ($version -ne "0.4.1.0") {
+          if ($version -ne "0.5.0.7") {
             throw "Unexpected FileVersion: $version"
           }
 
@@ -55,7 +55,7 @@ jobs:
           Copy-Item -LiteralPath "RELEASE-NOTES.md" -Destination $stage
           Copy-Item -LiteralPath "LICENSE" -Destination $stage
 
-          $zip = Join-Path $PWD "Genia-Unlocker-v0.4.1-Windows-x64-Portable.zip"
+          $zip = Join-Path $PWD "Genia-Unlocker-v0.5.0-Windows-x64-Portable.zip"
           if (Test-Path -LiteralPath $zip) {
             Remove-Item -LiteralPath $zip -Force
           }
@@ -63,8 +63,8 @@ jobs:
           Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal
 
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash
-          $hashFile = Join-Path $PWD "Genia-Unlocker-v0.4.1-Windows-x64-Portable-SHA256.txt"
-          Set-Content -LiteralPath $hashFile -Value "$hash  Genia-Unlocker-v0.4.1-Windows-x64-Portable.zip" -Encoding ascii
+          $hashFile = Join-Path $PWD "Genia-Unlocker-v0.5.0-Windows-x64-Portable-SHA256.txt"
+          Set-Content -LiteralPath $hashFile -Value "$hash  Genia-Unlocker-v0.5.0-Windows-x64-Portable.zip" -Encoding ascii
 
           "zip=$zip" >> $env:GITHUB_OUTPUT
           "hash=$hashFile" >> $env:GITHUB_OUTPUT
@@ -72,18 +72,18 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Genia-Unlocker-v0.4.1-Windows-x64-Portable
+          name: Genia-Unlocker-v0.5.0-Windows-x64-Portable
           path: |
-            Genia-Unlocker-v0.4.1-Windows-x64-Portable.zip
-            Genia-Unlocker-v0.4.1-Windows-x64-Portable-SHA256.txt
+            Genia-Unlocker-v0.5.0-Windows-x64-Portable.zip
+            Genia-Unlocker-v0.5.0-Windows-x64-Portable-SHA256.txt
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: Genia Unlocker v0.4.1 Final
+          name: Genia Unlocker v0.5.0 Final
           body_path: RELEASE-NOTES.md
           files: |
-            Genia-Unlocker-v0.4.1-Windows-x64-Portable.zip
-            Genia-Unlocker-v0.4.1-Windows-x64-Portable-SHA256.txt
+            Genia-Unlocker-v0.5.0-Windows-x64-Portable.zip
+            Genia-Unlocker-v0.5.0-Windows-x64-Portable-SHA256.txt
           generate_release_notes: false

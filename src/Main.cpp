@@ -34,7 +34,13 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"GeniaUnlockerWindow";
 constexpr wchar_t kWindowTitle[] = L"Genia Unlocker";
+constexpr wchar_t kAppVersionDisplay[] = L"0.5.0 Final";
+constexpr wchar_t kRepositoryUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker";
+constexpr wchar_t kIssuesUrl[] = L"https://github.com/geniasoftwin/Genia-Unlocker/issues/new";
 constexpr wchar_t kSettingsWindowClass[] = L"GeniaUnlockerSettingsWindow";
+constexpr wchar_t kAboutWindowClass[] = L"GeniaUnlockerAboutWindow";
+constexpr wchar_t kDetailsWindowClass[] = L"GeniaUnlockerDetailsWindow";
+constexpr wchar_t kConfirmWindowClass[] = L"GeniaUnlockerConfirmWindow";
 constexpr wchar_t kMutexName[] = L"Local\\GeniaUnlocker.Singleton.1";
 constexpr UINT WM_APP_SCAN_DONE = WM_APP + 10;
 constexpr UINT WM_APP_TRAY = WM_APP + 11;
@@ -60,10 +66,27 @@ constexpr int IDC_SETTINGS_SHELL = 2002;
 constexpr int IDC_SETTINGS_AUTOSTART = 2003;
 constexpr int IDC_SETTINGS_PERMANENT = 2004;
 constexpr int IDC_SETTINGS_CLOSE = 2005;
+constexpr int IDC_SETTINGS_ABOUT = 2006;
+constexpr int IDC_SETTINGS_VERSION = 2007;
+constexpr int IDC_SETTINGS_NOTE = 2008;
+
+constexpr int IDC_ABOUT_CLOSE = 3001;
+constexpr int IDC_ABOUT_GITHUB = 3002;
+constexpr int IDC_ABOUT_ISSUE = 3003;
+constexpr int IDC_ABOUT_COPY = 3004;
+
+constexpr int IDC_DETAILS_CLOSE = 4001;
+constexpr int IDC_DETAILS_COPY = 4002;
+constexpr int IDC_DETAILS_EDIT = 4003;
+
+constexpr int IDC_CONFIRM_CLOSE = 6001;
+constexpr int IDC_CONFIRM_OK = 6002;
+constexpr int IDC_CONFIRM_CANCEL = 6003;
 
 constexpr UINT ID_TRAY_OPEN = 5001;
 constexpr UINT ID_TRAY_FILE = 5002;
 constexpr UINT ID_TRAY_EXIT = 5003;
+constexpr UINT ID_TRAY_ABOUT = 5004;
 constexpr UINT ID_PROCESS_FORCE_UNLOCK = 5101;
 constexpr UINT ID_PROCESS_TERMINATE = 5102;
 constexpr UINT ID_PROCESS_OPEN_EXE = 5103;
@@ -86,6 +109,7 @@ UINT GetButtonCheck(HWND button) noexcept {
 
 struct ScanPayload {
     unsigned long long generation{};
+    ULONGLONG elapsedMs{};
     ScanResult result;
 };
 
@@ -104,6 +128,9 @@ struct AppState {
     HWND list{};
     HWND status{};
     HWND settingsWindow{};
+    HWND aboutWindow{};
+    HWND detailsWindow{};
+    HWND targetTooltip{};
     HFONT font{};
     HFONT titleFont{};
     HBRUSH windowBrush{};
@@ -118,6 +145,11 @@ struct AppState {
     std::vector<LockProcess> locks;
     std::atomic<unsigned long long> scanGeneration{0};
     DWORD lastInaccessibleProcessCount{};
+    DWORD lastRestartManagerError{};
+    DWORD lastInspectedDiskHandleCount{};
+    DWORD lastDeleteShareProbeError{};
+    bool lastHandleTypeFilterAvailable{};
+    bool lastDeleteShareProbeSucceeded{};
     bool lastTargetExists{};
     bool lastTargetIsDirectory{};
     bool scanInProgress{};
@@ -125,6 +157,12 @@ struct AppState {
     std::wstring pendingUnlockError;
     std::wstring pendingForceUnlockDetails;
     std::wstring lastStatusDetails;
+    ULONGLONG lastScanDurationMs{};
+    int savedColumnWidths[4]{};
+    bool savedColumnsValid{};
+    bool columnsInitialized{};
+    int restoredWindowWidth{780};
+    int restoredWindowHeight{460};
     bool permanentDeleteDefault{};
     bool exiting{};
 };
@@ -179,6 +217,80 @@ bool SavePermanentDeleteDefault(bool enabled) {
     const std::wstring ini = GetPortableSettingsPath();
     return WritePrivateProfileStringW(L"Actions", L"PermanentDelete",
                                       enabled ? L"1" : L"0", ini.c_str()) != FALSE;
+}
+
+
+int ClampPreference(int value, int minimum, int maximum) {
+    return (std::max)(minimum, (std::min)(maximum, value));
+}
+
+void LoadLayoutPreferences(AppState& state) {
+    const std::wstring ini = GetPortableSettingsPath();
+    state.restoredWindowWidth = ClampPreference(
+        GetPrivateProfileIntW(L"Window", L"Width", 780, ini.c_str()), 720, 2400);
+    state.restoredWindowHeight = ClampPreference(
+        GetPrivateProfileIntW(L"Window", L"Height", 460, ini.c_str()), 400, 1800);
+
+    static constexpr const wchar_t* kColumnKeys[] = {
+        L"ProcessWidth", L"PidWidth", L"MethodWidth", L"ObjectWidth"
+    };
+    bool valid = true;
+    for (int i = 0; i < 4; ++i) {
+        state.savedColumnWidths[i] =
+            GetPrivateProfileIntW(L"Columns", kColumnKeys[i], 0, ini.c_str());
+        if (state.savedColumnWidths[i] < 40 || state.savedColumnWidths[i] > 2400) {
+            valid = false;
+        }
+    }
+    state.savedColumnsValid = valid;
+}
+
+void CaptureColumnWidths(AppState* state) {
+    if (!state || !state->list || state->dpi <= 0) return;
+    bool valid = true;
+    for (int i = 0; i < 4; ++i) {
+        const int physical = ListView_GetColumnWidth(state->list, i);
+        const int logical = MulDiv(physical, 96, state->dpi);
+        state->savedColumnWidths[i] = logical;
+        if (logical < 40 || logical > 2400) {
+            valid = false;
+        }
+    }
+    state->savedColumnsValid = valid;
+}
+
+void SaveLayoutPreferences(AppState* state) {
+    if (!state) return;
+    const std::wstring ini = GetPortableSettingsPath();
+
+    auto writeInt = [&](const wchar_t* section, const wchar_t* key, int value) {
+        wchar_t buffer[32]{};
+        _itow_s(value, buffer, 10);
+        WritePrivateProfileStringW(section, key, buffer, ini.c_str());
+    };
+
+    if (state->hwnd && IsWindow(state->hwnd)) {
+        WINDOWPLACEMENT placement{};
+        placement.length = sizeof(placement);
+        if (GetWindowPlacement(state->hwnd, &placement)) {
+            const RECT& rc = placement.rcNormalPosition;
+            const int dpi = state->dpi > 0 ? state->dpi : 96;
+            const int width = MulDiv(rc.right - rc.left, 96, dpi);
+            const int height = MulDiv(rc.bottom - rc.top, 96, dpi);
+            writeInt(L"Window", L"Width", ClampPreference(width, 720, 2400));
+            writeInt(L"Window", L"Height", ClampPreference(height, 400, 1800));
+        }
+    }
+
+    CaptureColumnWidths(state);
+    if (state->savedColumnsValid) {
+        static constexpr const wchar_t* kColumnKeys[] = {
+            L"ProcessWidth", L"PidWidth", L"MethodWidth", L"ObjectWidth"
+        };
+        for (int i = 0; i < 4; ++i) {
+            writeInt(L"Columns", kColumnKeys[i], state->savedColumnWidths[i]);
+        }
+    }
 }
 
 ParsedArgs ParseArguments() {
@@ -319,7 +431,7 @@ void RecreateFonts(AppState* state) {
     if (state->titleFont) DeleteObject(state->titleFont);
 
     state->font = CreateModernFont(state->dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-    state->titleFont = CreateModernFont(state->dpi, 15, FW_SEMIBOLD, L"Segoe UI Variable Display");
+    state->titleFont = CreateModernFont(state->dpi, 14, FW_SEMIBOLD, L"Segoe UI Variable Display");
 }
 
 void ApplyFonts(AppState* state) {
@@ -332,8 +444,118 @@ void ApplyFonts(AppState* state) {
     SetFont(GetDlgItem(state->hwnd, IDC_APP_TITLE), state->titleFont);
 }
 
+
+LRESULT CALLBACK FlatHeaderSubclassProc(HWND hwnd,
+                                        UINT msg,
+                                        WPARAM wParam,
+                                        LPARAM lParam,
+                                        UINT_PTR subclassId,
+                                        DWORD_PTR refData) {
+    auto* state = reinterpret_cast<AppState*>(refData);
+
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT:
+        if (state) {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+
+            ModernTheme::Palette palette = state->palette;
+            if (palette.text == 0) {
+                palette = ModernTheme::QueryPalette();
+            }
+
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            const COLORREF headerFill = palette.dark ? palette.surface : palette.window;
+            HBRUSH background = CreateSolidBrush(headerFill);
+            FillRect(dc, &client, background);
+            DeleteObject(background);
+
+            const int count = Header_GetItemCount(hwnd);
+            HFONT font = state->font
+                ? state->font
+                : reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
+            HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, palette.text);
+
+            HPEN separator = CreatePen(PS_SOLID, 1, palette.border);
+            HGDIOBJ oldPen = SelectObject(dc, separator);
+
+            for (int i = 0; i < count; ++i) {
+                RECT itemRc{};
+                if (!Header_GetItemRect(hwnd, i, &itemRc)) {
+                    continue;
+                }
+
+                wchar_t textBuffer[256]{};
+                HDITEMW item{};
+                item.mask = HDI_TEXT | HDI_FORMAT;
+                item.pszText = textBuffer;
+                item.cchTextMax = static_cast<int>(_countof(textBuffer));
+                Header_GetItem(hwnd, i, &item);
+
+                HBRUSH itemBrush = CreateSolidBrush(headerFill);
+                FillRect(dc, &itemRc, itemBrush);
+                DeleteObject(itemBrush);
+
+                MoveToEx(dc, itemRc.right - 1, itemRc.top, nullptr);
+                LineTo(dc, itemRc.right - 1, itemRc.bottom);
+                MoveToEx(dc, itemRc.left, itemRc.bottom - 1, nullptr);
+                LineTo(dc, itemRc.right, itemRc.bottom - 1);
+
+                RECT textRc = itemRc;
+                textRc.left += Scale(state, 7);
+                textRc.right -= Scale(state, 6);
+
+                UINT format = DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS;
+                if ((item.fmt & HDF_RIGHT) != 0) {
+                    format |= DT_RIGHT;
+                } else if ((item.fmt & HDF_CENTER) != 0) {
+                    format |= DT_CENTER;
+                } else {
+                    format |= DT_LEFT;
+                }
+                DrawTextW(dc, textBuffer, -1, &textRc, format);
+            }
+
+            SelectObject(dc, oldPen);
+            DeleteObject(separator);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        break;
+
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, FlatHeaderSubclassProc, subclassId);
+        break;
+    }
+
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 void UpdateListColumns(AppState* state, int width) {
-    if (!state || !state->list || width <= 0) return;
+    if (!state || !state->list || width <= 0 || state->columnsInitialized) return;
+
+    if (state->savedColumnsValid) {
+        for (int i = 0; i < 4; ++i) {
+            ListView_SetColumnWidth(
+                state->list, i, MulDiv(state->savedColumnWidths[i], state->dpi, 96));
+        }
+        state->columnsInitialized = true;
+        return;
+    }
+
     const int usable = width - Scale(state, 6);
     const int processW = (std::max)(Scale(state, 138), usable * 24 / 100);
     const int pidW = (std::max)(Scale(state, 52), usable * 8 / 100);
@@ -343,6 +565,7 @@ void UpdateListColumns(AppState* state, int width) {
     ListView_SetColumnWidth(state->list, 1, pidW);
     ListView_SetColumnWidth(state->list, 2, detectedW);
     ListView_SetColumnWidth(state->list, 3, executableW);
+    state->columnsInitialized = true;
 }
 
 void UpdateTheme(AppState* state) {
@@ -358,11 +581,16 @@ void UpdateTheme(AppState* state) {
     for (int id : {IDC_TARGET, IDC_LIST}) {
         ModernTheme::ApplyControlTheme(GetDlgItem(state->hwnd, id), state->palette.dark);
     }
-    ModernTheme::ApplyControlTheme(ListView_GetHeader(state->list), state->palette.dark);
+    HWND header = ListView_GetHeader(state->list);
+    ModernTheme::ApplyControlTheme(header, state->palette.dark);
 
     ListView_SetBkColor(state->list, state->palette.surface);
     ListView_SetTextBkColor(state->list, state->palette.surface);
     ListView_SetTextColor(state->list, state->palette.text);
+    if (header) {
+        InvalidateRect(header, nullptr, TRUE);
+        UpdateWindow(header);
+    }
 
     RedrawWindow(state->hwnd, nullptr, nullptr,
                  RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
@@ -519,6 +747,733 @@ bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
     return true;
 }
 
+void OpenExternalUrl(HWND owner, const wchar_t* url) {
+    if (!url || !*url) return;
+    HINSTANCE result = ShellExecuteW(owner, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) {
+        MessageBoxW(owner, L"Windows could not open the requested link.", kWindowTitle, MB_ICONERROR);
+    }
+}
+
+struct AboutState {
+    AppState* app{};
+    HWND closeButton{};
+    HWND githubButton{};
+    HWND issueButton{};
+    HWND copyButton{};
+    HFONT font{};
+    HFONT titleFont{};
+    HFONT versionFont{};
+};
+
+std::wstring BuildVersionInfoText() {
+    return L"Genia Unlocker " + std::wstring(kAppVersionDisplay) +
+           L"\r\nAuthor: GeniaSoftWin"
+           L"\r\nLicense: MIT"
+           L"\r\nPlatform: Windows x64 · Native Win32 C++"
+           L"\r\nSource: " + std::wstring(kRepositoryUrl);
+}
+
+LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* about = reinterpret_cast<AboutState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        about = reinterpret_cast<AboutState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(about));
+    }
+
+    AppState* app = about ? about->app : nullptr;
+    switch (msg) {
+    case WM_CREATE: {
+        if (!about || !app) return -1;
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+        about->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+        about->titleFont = CreateModernFont(dpi, 15, FW_SEMIBOLD, L"Segoe UI Variable Display");
+        about->versionFont = CreateModernFont(dpi, 9, FW_SEMIBOLD, L"Segoe UI Variable Text");
+
+        about->closeButton = CreateWindowW(
+            L"BUTTON", L"×",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(408), sc(5), sc(24), sc(22), hwnd,
+            ControlId(IDC_ABOUT_CLOSE), nullptr, nullptr);
+        about->githubButton = CreateWindowW(
+            L"BUTTON", L"GitHub",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(16), sc(248), sc(72), sc(28), hwnd,
+            ControlId(IDC_ABOUT_GITHUB), nullptr, nullptr);
+        about->issueButton = CreateWindowW(
+            L"BUTTON", L"Report issue",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(96), sc(248), sc(92), sc(28), hwnd,
+            ControlId(IDC_ABOUT_ISSUE), nullptr, nullptr);
+        about->copyButton = CreateWindowW(
+            L"BUTTON", L"Copy info",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(196), sc(248), sc(86), sc(28), hwnd,
+            ControlId(IDC_ABOUT_COPY), nullptr, nullptr);
+        HWND close = CreateWindowW(
+            L"BUTTON", L"Close",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(350), sc(248), sc(74), sc(28), hwnd,
+            ControlId(IDCANCEL), nullptr, nullptr);
+
+        for (HWND button : {about->closeButton, about->githubButton,
+                            about->issueButton, about->copyButton, close}) {
+            SetFont(button, about->font);
+            ModernTheme::ApplyControlTheme(button, app->palette.dark);
+        }
+        ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
+        return 0;
+    }
+
+    case WM_ERASEBKGND:
+        if (app && app->windowBrush) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(reinterpret_cast<HDC>(wParam), &rc, app->windowBrush);
+            return 1;
+        }
+        break;
+
+    case WM_PAINT:
+        if (about && app) {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            SetBkMode(dc, TRANSPARENT);
+
+            RECT captionRc{sc(10), sc(3), rc.right - sc(48), sc(29)};
+            SetTextColor(dc, app->palette.text);
+            HGDIOBJ oldFont = about->font ? SelectObject(dc, about->font) : nullptr;
+            DrawTextW(dc, L"About Genia Unlocker", -1, &captionRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            if (app->icon) {
+                DrawIconEx(dc, sc(18), sc(48), app->icon, sc(42), sc(42),
+                           0, nullptr, DI_NORMAL);
+            }
+
+            RECT titleRc{sc(74), sc(46), rc.right - sc(18), sc(73)};
+            oldFont = about->titleFont ? SelectObject(dc, about->titleFont) : nullptr;
+            SetTextColor(dc, app->palette.text);
+            DrawTextW(dc, L"Genia Unlocker", -1, &titleRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            RECT versionRc{sc(74), sc(72), rc.right - sc(18), sc(94)};
+            oldFont = about->versionFont ? SelectObject(dc, about->versionFont) : nullptr;
+            SetTextColor(dc, app->palette.accent);
+            std::wstring version = L"v" + std::wstring(kAppVersionDisplay);
+            DrawTextW(dc, version.c_str(), -1, &versionRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            oldFont = about->font ? SelectObject(dc, about->font) : nullptr;
+            SetTextColor(dc, app->palette.text);
+
+            RECT descriptionRc{sc(18), sc(105), rc.right - sc(18), sc(129)};
+            DrawTextW(dc, L"Lightweight native Windows file/folder unlocker.",
+                      -1, &descriptionRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            RECT metaRc{sc(18), sc(136), rc.right - sc(18), sc(199)};
+            const wchar_t* meta =
+                L"Author: GeniaSoftWin\r\n"
+                L"License: MIT\r\n"
+                L"Platform: Windows x64 · Native Win32 C++";
+            DrawTextW(dc, meta, -1, &metaRc, DT_LEFT | DT_TOP);
+
+            SetTextColor(dc, app->palette.muted);
+            RECT sourceRc{sc(18), sc(201), rc.right - sc(18), sc(222)};
+            DrawTextW(dc, L"Source: github.com/geniasoftwin/Genia-Unlocker",
+                      -1, &sourceRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            RECT copyrightRc{sc(18), sc(220), rc.right - sc(18), sc(236)};
+            DrawTextW(dc, L"Copyright © 2026 GeniaSoftWin",
+                      -1, &copyrightRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            if (oldFont) SelectObject(dc, oldFont);
+
+            HPEN pen = CreatePen(PS_SOLID, 1, app->palette.border);
+            HGDIOBJ oldPen = SelectObject(dc, pen);
+            MoveToEx(dc, sc(16), sc(242), nullptr);
+            LineTo(dc, rc.right - sc(16), sc(242));
+            SelectObject(dc, oldPen);
+            DeleteObject(pen);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        break;
+
+    case WM_DRAWITEM:
+        if (app) {
+            const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (draw && draw->CtlType == ODT_BUTTON) {
+                ModernTheme::ButtonKind kind =
+                    draw->CtlID == IDC_ABOUT_GITHUB
+                        ? ModernTheme::ButtonKind::Primary
+                        : ModernTheme::ButtonKind::Secondary;
+                ModernTheme::DrawButton(*draw, app->palette, kind);
+                return TRUE;
+            }
+        }
+        break;
+
+    case WM_CTLCOLORBTN:
+        if (app) {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+            return reinterpret_cast<LRESULT>(app->windowBrush);
+        }
+        break;
+
+    case WM_COMMAND:
+        if (!about || !app) break;
+        switch (LOWORD(wParam)) {
+        case IDC_ABOUT_CLOSE:
+        case IDCANCEL:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        case IDC_ABOUT_GITHUB:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                OpenExternalUrl(hwnd, kRepositoryUrl);
+            }
+            return 0;
+        case IDC_ABOUT_ISSUE:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                OpenExternalUrl(hwnd, kIssuesUrl);
+            }
+            return 0;
+        case IDC_ABOUT_COPY:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                if (CopyTextToClipboard(hwnd, BuildVersionInfoText())) {
+                    SetWindowTextW(about->copyButton, L"Copied");
+                    InvalidateRect(about->copyButton, nullptr, TRUE);
+                } else {
+                    MessageBoxW(hwnd, L"Could not copy version information.",
+                                kWindowTitle, MB_ICONERROR);
+                }
+            }
+            return 0;
+        }
+        break;
+
+    case WM_DPICHANGED:
+        if (about && app) {
+            const int dpi = HIWORD(wParam) > 0 ? HIWORD(wParam) : 96;
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr,
+                             suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            if (about->font) DeleteObject(about->font);
+            if (about->titleFont) DeleteObject(about->titleFont);
+            if (about->versionFont) DeleteObject(about->versionFont);
+            about->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+            about->titleFont = CreateModernFont(dpi, 15, FW_SEMIBOLD, L"Segoe UI Variable Display");
+            about->versionFont = CreateModernFont(dpi, 9, FW_SEMIBOLD, L"Segoe UI Variable Text");
+
+            MoveWindow(about->closeButton, sc(408), sc(5), sc(24), sc(22), TRUE);
+            MoveWindow(about->githubButton, sc(16), sc(248), sc(72), sc(28), TRUE);
+            MoveWindow(about->issueButton, sc(96), sc(248), sc(92), sc(28), TRUE);
+            MoveWindow(about->copyButton, sc(196), sc(248), sc(86), sc(28), TRUE);
+            MoveWindow(GetDlgItem(hwnd, IDCANCEL), sc(350), sc(248), sc(74), sc(28), TRUE);
+
+            for (HWND button : {about->closeButton, about->githubButton,
+                                about->issueButton, about->copyButton,
+                                GetDlgItem(hwnd, IDCANCEL)}) {
+                SetFont(button, about->font);
+            }
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        if (app) {
+            ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+
+    case WM_NCHITTEST: {
+        POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (about && about->closeButton) {
+            RECT closeRc{};
+            GetWindowRect(about->closeButton, &closeRc);
+            if (PtInRect(&closeRc, pt)) {
+                return HTCLIENT;
+            }
+        }
+        RECT windowRc{};
+        GetWindowRect(hwnd, &windowRc);
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        const int captionHeight = MulDiv(32, dpi, 96);
+        if (pt.y >= windowRc.top && pt.y < windowRc.top + captionHeight) {
+            return HTCAPTION;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        if (app && app->aboutWindow == hwnd) {
+            app->aboutWindow = nullptr;
+        }
+        if (about) {
+            if (about->font) DeleteObject(about->font);
+            if (about->titleFont) DeleteObject(about->titleFont);
+            if (about->versionFont) DeleteObject(about->versionFont);
+        }
+        delete about;
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void ShowAboutDialog(AppState* state) {
+    if (!state || !state->hwnd) return;
+
+    if (state->aboutWindow && IsWindow(state->aboutWindow)) {
+        ShowWindow(state->aboutWindow, SW_RESTORE);
+        SetForegroundWindow(state->aboutWindow);
+        return;
+    }
+
+    HINSTANCE instance = reinterpret_cast<HINSTANCE>(
+        GetWindowLongPtrW(state->hwnd, GWLP_HINSTANCE));
+    static bool classReady = false;
+    if (!classReady) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = AboutWindowProc;
+        wc.hInstance = instance;
+        wc.hIcon = state->icon;
+        wc.hIconSm = state->icon;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = kAboutWindowClass;
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            MessageBoxW(state->hwnd, L"Could not create the About window.",
+                        kWindowTitle, MB_ICONERROR);
+            return;
+        }
+        classReady = true;
+    }
+
+    const int dpi = GetDpiForWindow(state->hwnd) > 0 ? GetDpiForWindow(state->hwnd) : 96;
+    const int width = MulDiv(440, dpi, 96);
+    const int height = MulDiv(288, dpi, 96);
+
+    HWND centerOwner =
+        state->settingsWindow && IsWindowVisible(state->settingsWindow)
+            ? state->settingsWindow
+            : state->hwnd;
+    RECT owner{};
+    GetWindowRect(centerOwner, &owner);
+    const int x = owner.left + ((owner.right - owner.left) - width) / 2;
+    const int y = owner.top + ((owner.bottom - owner.top) - height) / 2;
+
+    auto* about = new AboutState{};
+    about->app = state;
+    HWND window = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        kAboutWindowClass,
+        L"About Genia Unlocker",
+        WS_POPUP | WS_BORDER,
+        x, y, width, height,
+        centerOwner, nullptr, instance, about);
+    if (!window) {
+        delete about;
+        MessageBoxW(state->hwnd, L"Could not open About.",
+                    kWindowTitle, MB_ICONERROR);
+        return;
+    }
+
+    state->aboutWindow = window;
+    ShowWindow(window, SW_SHOWNORMAL);
+    UpdateWindow(window);
+}
+
+
+struct ConfirmState {
+    AppState* app{};
+    std::wstring title;
+    std::wstring message;
+    std::wstring confirmText;
+    std::wstring cancelText;
+    bool danger{};
+    bool defaultConfirm{};
+    bool result{};
+    bool finished{};
+    HWND closeButton{};
+    HWND confirmButton{};
+    HWND cancelButton{};
+    HFONT font{};
+    HFONT titleFont{};
+};
+
+LRESULT CALLBACK ConfirmWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* confirm = reinterpret_cast<ConfirmState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        confirm = reinterpret_cast<ConfirmState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(confirm));
+    }
+
+    AppState* app = confirm ? confirm->app : nullptr;
+    switch (msg) {
+    case WM_CREATE: {
+        if (!confirm || !app) return -1;
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+        confirm->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+        confirm->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
+
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        confirm->closeButton = CreateWindowW(
+            L"BUTTON", L"×",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            rc.right - sc(32), sc(5), sc(24), sc(22), hwnd,
+            ControlId(IDC_CONFIRM_CLOSE), nullptr, nullptr);
+
+        const int buttonY = rc.bottom - sc(46);
+        const int cancelW = sc(82);
+        const int confirmW = sc(128);
+        confirm->cancelButton = CreateWindowW(
+            L"BUTTON", confirm->cancelText.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            rc.right - sc(16) - cancelW, buttonY, cancelW, sc(30), hwnd,
+            ControlId(IDC_CONFIRM_CANCEL), nullptr, nullptr);
+        confirm->confirmButton = CreateWindowW(
+            L"BUTTON", confirm->confirmText.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            rc.right - sc(24) - cancelW - confirmW, buttonY, confirmW, sc(30), hwnd,
+            ControlId(IDC_CONFIRM_OK), nullptr, nullptr);
+
+        for (HWND button : {confirm->closeButton, confirm->confirmButton, confirm->cancelButton}) {
+            SetFont(button, confirm->font);
+            ModernTheme::ApplyControlTheme(button, app->palette.dark);
+        }
+        ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
+        SetFocus(confirm->defaultConfirm ? confirm->confirmButton : confirm->cancelButton);
+        return 0;
+    }
+
+    case WM_ERASEBKGND:
+        if (app && app->windowBrush) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(reinterpret_cast<HDC>(wParam), &rc, app->windowBrush);
+            return 1;
+        }
+        break;
+
+    case WM_PAINT:
+        if (confirm && app) {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+
+            HGDIOBJ oldFont = confirm->font ? SelectObject(dc, confirm->font) : nullptr;
+            RECT captionRc{sc(10), sc(3), rc.right - sc(42), sc(29)};
+            DrawTextW(dc, L"Genia Unlocker", -1, &captionRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            // Flat warning mark: no stock 3-D system icon, just a compact
+            // outlined status circle using the same palette as destructive actions.
+            HPEN warningPen = CreatePen(PS_SOLID, (std::max)(1, sc(1)), app->palette.danger);
+            HGDIOBJ oldWarningPen = SelectObject(dc, warningPen);
+            HGDIOBJ oldWarningBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            Ellipse(dc, sc(18), sc(47), sc(48), sc(77));
+            SelectObject(dc, oldWarningBrush);
+            SelectObject(dc, oldWarningPen);
+            DeleteObject(warningPen);
+
+            RECT warningTextRc{sc(18), sc(47), sc(48), sc(77)};
+            HFONT warningFont = CreateModernFont(dpi, 13, FW_BOLD, L"Segoe UI Variable Display");
+            oldFont = warningFont ? SelectObject(dc, warningFont) : nullptr;
+            SetTextColor(dc, app->palette.danger);
+            DrawTextW(dc, L"!", -1, &warningTextRc,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (oldFont) SelectObject(dc, oldFont);
+            if (warningFont) DeleteObject(warningFont);
+            SetTextColor(dc, app->palette.text);
+
+            oldFont = confirm->titleFont ? SelectObject(dc, confirm->titleFont) : nullptr;
+            RECT titleRc{sc(62), sc(44), rc.right - sc(18), sc(79)};
+            DrawTextW(dc, confirm->title.c_str(), -1, &titleRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            oldFont = confirm->font ? SelectObject(dc, confirm->font) : nullptr;
+            RECT messageRc{sc(18), sc(88), rc.right - sc(18), rc.bottom - sc(62)};
+            DrawTextW(dc, confirm->message.c_str(), -1, &messageRc,
+                      DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            HPEN pen = CreatePen(PS_SOLID, 1, app->palette.border);
+            HGDIOBJ oldPen = SelectObject(dc, pen);
+            MoveToEx(dc, sc(16), rc.bottom - sc(58), nullptr);
+            LineTo(dc, rc.right - sc(16), rc.bottom - sc(58));
+            SelectObject(dc, oldPen);
+            DeleteObject(pen);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        break;
+
+    case WM_DRAWITEM:
+        if (app && confirm) {
+            const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (draw && draw->CtlType == ODT_BUTTON) {
+                ModernTheme::ButtonKind kind = ModernTheme::ButtonKind::Secondary;
+                if (draw->CtlID == IDC_CONFIRM_OK) {
+                    kind = confirm->danger
+                        ? ModernTheme::ButtonKind::Danger
+                        : ModernTheme::ButtonKind::Primary;
+                }
+                ModernTheme::DrawButton(*draw, app->palette, kind);
+                return TRUE;
+            }
+        }
+        break;
+
+    case WM_CTLCOLORBTN:
+        if (app) {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+            return reinterpret_cast<LRESULT>(app->windowBrush);
+        }
+        break;
+
+    case WM_COMMAND:
+        if (!confirm) break;
+        if (LOWORD(wParam) == IDC_CONFIRM_OK && HIWORD(wParam) == BN_CLICKED) {
+            confirm->result = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if ((LOWORD(wParam) == IDC_CONFIRM_CANCEL || LOWORD(wParam) == IDC_CONFIRM_CLOSE) &&
+            HIWORD(wParam) == BN_CLICKED) {
+            confirm->result = false;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+
+    case WM_DPICHANGED:
+        if (confirm && app) {
+            const int dpi = HIWORD(wParam) > 0 ? HIWORD(wParam) : 96;
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr,
+                             suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+
+            if (confirm->font) DeleteObject(confirm->font);
+            if (confirm->titleFont) DeleteObject(confirm->titleFont);
+            confirm->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+            confirm->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
+
+            MoveWindow(confirm->closeButton, rc.right - sc(32), sc(5), sc(24), sc(22), TRUE);
+            const int buttonY = rc.bottom - sc(46);
+            const int cancelW = sc(82);
+            const int confirmW = sc(128);
+            MoveWindow(confirm->cancelButton, rc.right - sc(16) - cancelW,
+                       buttonY, cancelW, sc(30), TRUE);
+            MoveWindow(confirm->confirmButton, rc.right - sc(24) - cancelW - confirmW,
+                       buttonY, confirmW, sc(30), TRUE);
+
+            for (HWND button : {confirm->closeButton, confirm->confirmButton,
+                                confirm->cancelButton}) {
+                SetFont(button, confirm->font);
+            }
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+
+    case WM_NCHITTEST: {
+        POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (confirm && confirm->closeButton) {
+            RECT closeRc{};
+            GetWindowRect(confirm->closeButton, &closeRc);
+            if (PtInRect(&closeRc, pt)) {
+                return HTCLIENT;
+            }
+        }
+        RECT windowRc{};
+        GetWindowRect(hwnd, &windowRc);
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        if (pt.y >= windowRc.top && pt.y < windowRc.top + MulDiv(32, dpi, 96)) {
+            return HTCAPTION;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        if (confirm) confirm->result = false;
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        if (confirm) {
+            confirm->finished = true;
+            if (confirm->font) DeleteObject(confirm->font);
+            if (confirm->titleFont) DeleteObject(confirm->titleFont);
+            confirm->font = nullptr;
+            confirm->titleFont = nullptr;
+        }
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+bool ShowThemedConfirm(AppState* state,
+                       const std::wstring& title,
+                       const std::wstring& message,
+                       const std::wstring& confirmText,
+                       const std::wstring& cancelText = L"Cancel",
+                       bool danger = false,
+                       bool defaultConfirm = false) {
+    if (!state || !state->hwnd) return false;
+
+    HINSTANCE instance = reinterpret_cast<HINSTANCE>(
+        GetWindowLongPtrW(state->hwnd, GWLP_HINSTANCE));
+    static bool classReady = false;
+    if (!classReady) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = ConfirmWindowProc;
+        wc.hInstance = instance;
+        wc.hIcon = state->icon;
+        wc.hIconSm = state->icon;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = kConfirmWindowClass;
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            return MessageBoxW(state->hwnd, message.c_str(), title.c_str(),
+                               MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+        }
+        classReady = true;
+    }
+
+    const int dpi = GetDpiForWindow(state->hwnd) > 0 ? GetDpiForWindow(state->hwnd) : 96;
+    const int width = MulDiv(540, dpi, 96);
+
+    HDC dc = GetDC(state->hwnd);
+    RECT measure{0, 0, width - MulDiv(36, dpi, 96), 0};
+    HGDIOBJ oldFont = state->font ? SelectObject(dc, state->font) : nullptr;
+    DrawTextW(dc, message.c_str(), -1, &measure,
+              DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    if (oldFont) SelectObject(dc, oldFont);
+    ReleaseDC(state->hwnd, dc);
+
+    const int minHeight = MulDiv(230, dpi, 96);
+    const int maxHeight = MulDiv(470, dpi, 96);
+    const int desiredHeight = measure.bottom + MulDiv(165, dpi, 96);
+    const int height = (std::max)(minHeight, (std::min)(maxHeight, desiredHeight));
+
+    RECT owner{};
+    GetWindowRect(state->hwnd, &owner);
+    const int x = owner.left + ((owner.right - owner.left) - width) / 2;
+    const int y = owner.top + ((owner.bottom - owner.top) - height) / 2;
+
+    ConfirmState confirm{};
+    confirm.app = state;
+    confirm.title = title;
+    confirm.message = message;
+    confirm.confirmText = confirmText;
+    confirm.cancelText = cancelText;
+    confirm.danger = danger;
+    confirm.defaultConfirm = defaultConfirm;
+
+    HWND window = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_DLGMODALFRAME,
+        kConfirmWindowClass,
+        title.c_str(),
+        WS_POPUP | WS_BORDER,
+        x, y, width, height,
+        state->hwnd, nullptr, instance, &confirm);
+    if (!window) {
+        return MessageBoxW(state->hwnd, message.c_str(), title.c_str(),
+                           MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+    }
+
+    EnableWindow(state->hwnd, FALSE);
+    ShowWindow(window, SW_SHOWNORMAL);
+    UpdateWindow(window);
+
+    MSG msg{};
+    while (!confirm.finished) {
+        const BOOL status = GetMessageW(&msg, nullptr, 0, 0);
+        if (status <= 0) {
+            if (status == 0) PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+
+        if ((msg.hwnd == window || IsChild(window, msg.hwnd)) && msg.message == WM_KEYDOWN) {
+            if (msg.wParam == VK_ESCAPE) {
+                confirm.result = false;
+                DestroyWindow(window);
+                continue;
+            }
+            if (msg.wParam == VK_RETURN) {
+                confirm.result = confirm.defaultConfirm;
+                if (!confirm.defaultConfirm && msg.hwnd == confirm.confirmButton) {
+                    confirm.result = true;
+                }
+                DestroyWindow(window);
+                continue;
+            }
+        }
+
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    EnableWindow(state->hwnd, TRUE);
+    SetForegroundWindow(state->hwnd);
+    return confirm.result;
+}
+
 void PopulateList(AppState* state) {
     ListView_DeleteAllItems(state->list);
     if (state->processImageList) {
@@ -569,7 +1524,7 @@ void UpdateActionButtons(AppState* state) {
     const bool exists = state->lastTargetExists;
     const bool hasLocks = !state->locks.empty();
     const bool verifiedClean =
-        exists && !hasLocks && state->lastInaccessibleProcessCount == 0;
+        exists && !hasLocks && state->lastDeleteShareProbeSucceeded;
     const int selectedRow = state->list
         ? ListView_GetNextItem(state->list, -1, LVNI_SELECTED)
         : -1;
@@ -620,13 +1575,15 @@ void StartScan(AppState* state) {
     state->scanInProgress = true;
     SetStatusWithDetails(state, L"Scanning...",
         L"Scanning Restart Manager, process images/modules and system file handles...");
-    SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Rescan");
+    SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Scanning…");
     UpdateActionButtons(state);
 
     std::thread([hwnd, generation, target]() {
         auto payload = std::make_unique<ScanPayload>();
         payload->generation = generation;
+        const ULONGLONG started = GetTickCount64();
         payload->result = ScanLocks(target);
+        payload->elapsedMs = GetTickCount64() - started;
         if (PostMessageW(hwnd, WM_APP_SCAN_DONE, 0, reinterpret_cast<LPARAM>(payload.get()))) {
             payload.release();
         }
@@ -667,6 +1624,11 @@ void SetTarget(AppState* state, const std::wstring& target, bool showWindow = tr
     state->lastTargetExists = false;
     state->lastTargetIsDirectory = false;
     state->lastInaccessibleProcessCount = 0;
+    state->lastRestartManagerError = ERROR_SUCCESS;
+    state->lastInspectedDiskHandleCount = 0;
+    state->lastDeleteShareProbeError = ERROR_SUCCESS;
+    state->lastHandleTypeFilterAvailable = false;
+    state->lastDeleteShareProbeSucceeded = false;
     SetWindowTextW(state->targetEdit, target.c_str());
     if (showWindow) {
         ActivateMainWindow(state);
@@ -683,13 +1645,27 @@ void AddTrayIcon(AppState* state) {
     state->tray.cbSize = sizeof(state->tray);
     state->tray.hWnd = state->hwnd;
     state->tray.uID = 1;
-    state->tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+
+    // With NOTIFYICON_VERSION_4 Windows can suppress the classic szTip text
+    // unless NIF_SHOWTIP is explicitly requested. Without it, Windows 11 may
+    // still create the hover bubble but leave the content area empty.
+    state->tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     state->tray.uCallbackMessage = WM_APP_TRAY;
     state->tray.hIcon = state->icon;
     wcscpy_s(state->tray.szTip, L"Genia Unlocker");
-    Shell_NotifyIconW(NIM_ADD, &state->tray);
+
+    if (!Shell_NotifyIconW(NIM_ADD, &state->tray)) {
+        return;
+    }
+
     state->tray.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &state->tray);
+
+    // Reassert the tooltip after switching to version 4. Explorer can recreate
+    // the notification area independently (TaskbarCreated), so AddTrayIcon is
+    // also the single source of truth for restoring hover text.
+    state->tray.uFlags = NIF_TIP | NIF_SHOWTIP;
+    Shell_NotifyIconW(NIM_MODIFY, &state->tray);
 }
 
 void RemoveTrayIcon(AppState* state) {
@@ -702,6 +1678,8 @@ void ShowTrayMenu(AppState* state) {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN, L"Open Genia Unlocker");
     AppendMenuW(menu, MF_STRING, ID_TRAY_FILE, L"Select file...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_TRAY_ABOUT, L"About Genia Unlocker");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Exit");
     SetForegroundWindow(state->hwnd);
@@ -716,6 +1694,8 @@ struct SettingsState {
     HWND shellCheck{};
     HWND autostartCheck{};
     HWND permanentDeleteCheck{};
+    HWND aboutButton{};
+    HWND versionLabel{};
     HFONT font{};
     HFONT titleFont{};
 };
@@ -748,7 +1728,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
 
         settings->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
-        settings->titleFont = CreateModernFont(dpi, 15, FW_SEMIBOLD, L"Segoe UI Variable Display");
+        settings->titleFont = CreateModernFont(dpi, 14, FW_SEMIBOLD, L"Segoe UI Variable Display");
 
         // Compact custom caption for the Settings tool window.  The native
         // caption always places its Close button flush against the right frame;
@@ -779,19 +1759,33 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         HWND note = CreateWindowW(
             L"STATIC", L"Portable preference is saved beside GeniaUnlocker.exe.",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            sc(16), sc(179), sc(350), sc(22), hwnd,
-            nullptr, nullptr, nullptr);
+            sc(16), sc(177), sc(350), sc(22), hwnd,
+            ControlId(IDC_SETTINGS_NOTE), nullptr, nullptr);
+        settings->aboutButton = CreateWindowW(
+            L"BUTTON", L"About Genia Unlocker",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(16), sc(204), sc(150), sc(28), hwnd,
+            ControlId(IDC_SETTINGS_ABOUT), nullptr, nullptr);
+        std::wstring versionText = L"v" + std::wstring(kAppVersionDisplay);
+        settings->versionLabel = CreateWindowW(
+            L"STATIC", versionText.c_str(),
+            WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            sc(184), sc(209), sc(192), sc(20), hwnd,
+            ControlId(IDC_SETTINGS_VERSION), nullptr, nullptr);
 
         SetFont(settings->closeButton, settings->font);
         SetFont(title, settings->titleFont);
         SetFont(settings->shellCheck, settings->font);
         SetFont(settings->autostartCheck, settings->font);
         SetFont(settings->permanentDeleteCheck, settings->font);
+        SetFont(settings->aboutButton, settings->font);
+        SetFont(settings->versionLabel, settings->font);
         SetFont(note, settings->font);
         ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
         ModernTheme::ApplyControlTheme(settings->shellCheck, app->palette.dark);
         ModernTheme::ApplyControlTheme(settings->autostartCheck, app->palette.dark);
         ModernTheme::ApplyControlTheme(settings->permanentDeleteCheck, app->palette.dark);
+        ModernTheme::ApplyControlTheme(settings->aboutButton, app->palette.dark);
         ModernTheme::ApplyControlTheme(settings->closeButton, app->palette.dark);
         SyncSettingsControls(settings);
         return 0;
@@ -828,7 +1822,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (app) {
             HDC dc = reinterpret_cast<HDC>(wParam);
             SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, app->palette.text);
+            const HWND control = reinterpret_cast<HWND>(lParam);
+            SetTextColor(dc, GetDlgCtrlID(control) == IDC_SETTINGS_VERSION
+                                 ? app->palette.muted
+                                 : app->palette.text);
             return reinterpret_cast<LRESULT>(app->windowBrush);
         }
         break;
@@ -847,6 +1844,11 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case IDC_SETTINGS_CLOSE:
             if (HIWORD(wParam) == BN_CLICKED) {
                 DestroyWindow(hwnd);
+            }
+            return 0;
+        case IDC_SETTINGS_ABOUT:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                ShowAboutDialog(app);
             }
             return 0;
         case IDC_SETTINGS_SHELL:
@@ -888,6 +1890,44 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
         break;
+    case WM_DPICHANGED:
+        if (settings && app) {
+            const int dpi = HIWORD(wParam) > 0 ? HIWORD(wParam) : 96;
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr,
+                             suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            if (settings->font) DeleteObject(settings->font);
+            if (settings->titleFont) DeleteObject(settings->titleFont);
+            settings->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+            settings->titleFont = CreateModernFont(dpi, 14, FW_SEMIBOLD, L"Segoe UI Variable Display");
+
+            MoveWindow(settings->closeButton, sc(368), sc(5), sc(24), sc(22), TRUE);
+            MoveWindow(GetDlgItem(hwnd, IDC_SETTINGS_TITLE), sc(16), sc(42), sc(330), sc(28), TRUE);
+            MoveWindow(settings->shellCheck, sc(16), sc(84), sc(320), sc(24), TRUE);
+            MoveWindow(settings->autostartCheck, sc(16), sc(112), sc(340), sc(24), TRUE);
+            MoveWindow(settings->permanentDeleteCheck, sc(16), sc(144), sc(350), sc(24), TRUE);
+            MoveWindow(GetDlgItem(hwnd, IDC_SETTINGS_NOTE), sc(16), sc(177), sc(350), sc(22), TRUE);
+            MoveWindow(settings->aboutButton, sc(16), sc(204), sc(150), sc(28), TRUE);
+            MoveWindow(settings->versionLabel, sc(184), sc(209), sc(192), sc(20), TRUE);
+
+            for (HWND control : {settings->closeButton, settings->shellCheck,
+                                 settings->autostartCheck, settings->permanentDeleteCheck,
+                                 settings->aboutButton, settings->versionLabel,
+                                 GetDlgItem(hwnd, IDC_SETTINGS_NOTE)}) {
+                SetFont(control, settings->font);
+            }
+            SetFont(GetDlgItem(hwnd, IDC_SETTINGS_TITLE), settings->titleFont);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+
     case WM_NCHITTEST: {
         // Make the custom caption draggable while keeping the inset Close
         // button clickable. Coordinates in lParam are screen coordinates.
@@ -955,7 +1995,7 @@ void ShowSettingsWindow(AppState* state) {
 
     const int dpi = GetDpiForWindow(state->hwnd) > 0 ? GetDpiForWindow(state->hwnd) : 96;
     const int width = MulDiv(400, dpi, 96);
-    const int height = MulDiv(220, dpi, 96);
+    const int height = MulDiv(250, dpi, 96);
     RECT owner{};
     GetWindowRect(state->hwnd, &owner);
     const int x = owner.left + ((owner.right - owner.left) - width) / 2;
@@ -1116,10 +2156,10 @@ bool ConfirmDelete(AppState* state, const wchar_t* title) {
         prompt += L"\n\nYou can change the default delete mode in Settings.";
     }
 
-    return MessageBoxW(state->hwnd,
-                       prompt.c_str(),
-                       title,
-                       MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+    return ShowThemedConfirm(
+        state, title, prompt,
+        state->permanentDeleteDefault ? L"Delete permanently" : L"Delete",
+        L"Cancel", true, false);
 }
 
 bool ScheduleDeleteOnRebootRecursive(const std::wstring& path, std::wstring& errorText) {
@@ -1176,14 +2216,16 @@ bool OfferDeleteOnReboot(AppState* state) {
     if (!state || state->target.empty() || IsVolumeRootTarget(state->target)) {
         return false;
     }
-    const int answer = MessageBoxW(
-        state->hwnd,
-        L"Windows could not delete the item now.\n\n"
-        L"Schedule it for permanent deletion at the next Windows startup?\n\n"
-        L"This fallback does not use the Recycle Bin and cannot be undone after restart.",
-        L"Delete on reboot",
-        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-    if (answer != IDYES) {
+    if (!ShowThemedConfirm(
+            state,
+            L"Delete on reboot",
+            L"Windows could not delete the item now.\n\n"
+            L"Schedule it for permanent deletion at the next Windows startup?\n\n"
+            L"This fallback does not use the Recycle Bin and cannot be undone after restart.",
+            L"Schedule",
+            L"Cancel",
+            true,
+            false)) {
         return false;
     }
 
@@ -1207,15 +2249,41 @@ bool TryDeleteCurrentTarget(AppState* state, const std::wstring& successText) {
         ? L"Permanently deleting the selected item..."
         : L"Moving the selected item to the Recycle Bin...");
     std::wstring error;
-    if (DeleteTargetWithShell(state->target, state->permanentDeleteDefault, error)) {
-        state->lastTargetExists = false;
-        state->lastTargetIsDirectory = false;
-        state->lastInaccessibleProcessCount = 0;
-        state->locks.clear();
-        PopulateList(state);
-        SetStatus(state, successText);
-        UpdateActionButtons(state);
-        return true;
+    constexpr int kDeleteAttempts = 4;
+    for (int attempt = 1; attempt <= kDeleteAttempts; ++attempt) {
+        if (DeleteTargetWithShell(state->target, state->permanentDeleteDefault, error)) {
+            state->lastTargetExists = false;
+            state->lastTargetIsDirectory = false;
+            state->lastInaccessibleProcessCount = 0;
+            state->locks.clear();
+            PopulateList(state);
+            SetStatus(state, successText);
+            UpdateActionButtons(state);
+            return true;
+        }
+
+        if (attempt < kDeleteAttempts) {
+            const DWORD attrs = GetFileAttributesW(state->target.c_str());
+            if (attrs == INVALID_FILE_ATTRIBUTES) {
+                const DWORD verifyError = GetLastError();
+                if (verifyError == ERROR_FILE_NOT_FOUND || verifyError == ERROR_PATH_NOT_FOUND) {
+                    state->lastTargetExists = false;
+                    state->lastTargetIsDirectory = false;
+                    state->lastInaccessibleProcessCount = 0;
+                    state->locks.clear();
+                    PopulateList(state);
+                    SetStatus(state, successText);
+                    UpdateActionButtons(state);
+                    return true;
+                }
+            }
+
+            // A process can release/reopen its final handle just after the rescan.
+            // Give Windows a short grace period before escalating to delete-on-reboot.
+            static constexpr DWORD kRetryDelaysMs[] = { 120, 220, 360 };
+            Sleep(kRetryDelaysMs[attempt - 1]);
+            error.clear();
+        }
     }
 
     if (!error.empty()) {
@@ -1300,10 +2368,9 @@ bool TerminateDetectedForDelete(AppState* state, std::wstring& errorText) {
 
 bool StartTerminateThenDelete(AppState* state) {
     const std::wstring prompt = BuildBlockingProcessPrompt(state);
-    if (MessageBoxW(state->hwnd,
-                    prompt.c_str(),
-                    L"Unlock & Delete",
-                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+    if (!ShowThemedConfirm(
+            state, L"Unlock & Delete", prompt,
+            L"Terminate & Delete", L"Cancel", true, false)) {
         state->pendingAction = PendingAction::None;
         SetStatus(state, L"Deletion cancelled. The item is still locked.");
         return false;
@@ -1367,13 +2434,15 @@ bool ExecuteForceUnlock(AppState* state, bool allowElevation, std::wstring& deta
     details = FormatForceUnlockResult(result);
 
     if (result.inaccessibleProcessCount != 0 && !IsRunningElevated() && allowElevation) {
-        const int answer = MessageBoxW(
-            state->hwnd,
-            L"Some matching file-handle owners could not be modified with current permissions.\n\n"
-            L"Run the Force Unlock pass once as administrator?",
-            L"Force Unlock",
-            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON1);
-        if (answer == IDYES) {
+        if (ShowThemedConfirm(
+                state,
+                L"Force Unlock",
+                L"Some matching file-handle owners could not be modified with current permissions.\n\n"
+                L"Run the Force Unlock pass once as administrator?",
+                L"Run as Admin",
+                L"Not now",
+                false,
+                true)) {
             DWORD helperCode = ERROR_GEN_FAILURE;
             std::wstring helperError;
             if (!RunElevatedForceUnlockHelper(state->target, helperCode, helperError)) {
@@ -1416,16 +2485,17 @@ void ForceUnlockCurrent(AppState* state) {
         return;
     }
 
-    const int answer = MessageBoxW(
-        state->hwnd,
-        L"Force Unlock closes only matching file handles inside other processes instead of "
-        L"terminating the whole process.\n\n"
-        L"This is more invasive than normal Unlock: an application may become unstable if it "
-        L"expects the handle to remain valid. Critical Windows processes are never modified.\n\n"
-        L"Continue?",
-        L"Force Unlock",
-        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-    if (answer != IDYES) {
+    if (!ShowThemedConfirm(
+            state,
+            L"Force Unlock",
+            L"Force Unlock closes only matching file handles inside other processes instead of "
+            L"terminating the whole process.\n\n"
+            L"This is more invasive than normal Unlock: an application may become unstable if it "
+            L"expects the handle to remain valid. Critical Windows processes are never modified.",
+            L"Force Unlock",
+            L"Cancel",
+            false,
+            false)) {
         return;
     }
 
@@ -1454,15 +2524,17 @@ void GracefulUnlock(AppState* state) {
         return;
     }
 
-    int answer = MessageBoxW(
-        state->hwnd,
-        L"Genia Unlocker will ask applications locking this item to close gracefully.\n\n"
-        L"After the request, Genia Unlocker will rescan the item and report whether the "
-        L"lock was actually released.\n\n"
-        L"Unsaved work in those applications may still be affected. Continue?",
-        L"Unlock",
-        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-    if (answer != IDYES) {
+    if (!ShowThemedConfirm(
+            state,
+            L"Unlock",
+            L"Genia Unlocker will ask applications locking this item to close gracefully.\n\n"
+            L"After the request, Genia Unlocker will rescan the item and report whether the "
+            L"lock was actually released.\n\n"
+            L"Unsaved work in those applications may still be affected.",
+            L"Unlock",
+            L"Cancel",
+            false,
+            false)) {
         return;
     }
 
@@ -1524,8 +2596,9 @@ void TerminateSelected(AppState* state) {
 
     std::wstring prompt = L"Terminate " + process.name + L" (PID " + std::to_wstring(process.pid) +
                           L")?\n\nUnsaved data in this process can be lost.";
-    if (MessageBoxW(state->hwnd, prompt.c_str(), L"Terminate process",
-                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+    if (!ShowThemedConfirm(
+            state, L"Terminate process", prompt,
+            L"Terminate", L"Cancel", true, false)) {
         return;
     }
 
@@ -1619,14 +2692,29 @@ void RetryScan(AppState* state) {
         return;
     }
 
-    if (state->lastInaccessibleProcessCount != 0 && !IsRunningElevated()) {
-        const int answer = MessageBoxW(
-            state->hwnd,
-            L"Some processes that own file handles could not be inspected with current permissions.\n\n"
-            L"Restart Genia Unlocker as administrator and rescan this target?",
-            L"Scan as administrator",
-            MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON1);
-        if (answer == IDYES) {
+    const bool unidentifiedSharingLock =
+        state->locks.empty() &&
+        state->lastDeleteShareProbeError == ERROR_SHARING_VIOLATION;
+    if (unidentifiedSharingLock && !IsRunningElevated()) {
+        std::wstring prompt;
+        if (unidentifiedSharingLock) {
+            prompt =
+                L"Windows confirms that this target is blocked by file sharing, "
+                L"but the owning process was not identified with current permissions.\n\n"
+                L"Restart Genia Unlocker as administrator and rescan this target?";
+        } else {
+            prompt =
+                L"Some processes that own file handles could not be inspected with current permissions.\n\n"
+                L"Restart Genia Unlocker as administrator and rescan this target?";
+        }
+        if (ShowThemedConfirm(
+                state,
+                L"Scan as administrator",
+                prompt,
+                L"Scan as Admin",
+                L"Cancel",
+                false,
+                true)) {
             std::wstring error;
             if (RunElevatedScanInstance(state->target, error)) {
                 state->exiting = true;
@@ -1650,9 +2738,12 @@ bool HandlePendingActionAfterScan(AppState* state, const ScanResult& result) {
 
     const PendingAction action = state->pendingAction;
     const bool noDetectedLocks = result.targetExists && state->locks.empty();
+    // A global count of inaccessible file-handle owners is not evidence that
+    // any of them owns this target. Verify the target itself with a harmless
+    // DELETE-access/share probe instead.
     const bool verifiedUnlocked =
         noDetectedLocks &&
-        result.inaccessibleProcessCount == 0;
+        result.deleteShareProbeSucceeded;
 
     if (action == PendingAction::VerifyUnlock) {
         state->pendingAction = PendingAction::None;
@@ -1731,16 +2822,18 @@ bool HandlePendingActionAfterScan(AppState* state, const ScanResult& result) {
             state->locks.begin(), state->locks.end(),
             [](const LockProcess& process) { return process.foundByHandleScan; });
         if (hasHandleLocks) {
-            const int forceAnswer = MessageBoxW(
-                state->hwnd,
-                L"Normal Unlock did not release the item.\n\n"
-                L"Try Force Unlock next? Genia Unlocker will close only file handles that match "
-                L"this target, without terminating the whole process. Critical Windows processes "
-                L"are skipped.\n\n"
-                L"An application can become unstable if it expects a closed handle to remain valid.",
-                L"Unlock & Delete — Force Unlock",
-                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1);
-            if (forceAnswer == IDYES) {
+            if (ShowThemedConfirm(
+                    state,
+                    L"Unlock & Delete — Force Unlock",
+                    L"Normal Unlock did not release the item.\n\n"
+                    L"Try Force Unlock next? Genia Unlocker will close only file handles that match "
+                    L"this target, without terminating the whole process. Critical Windows processes "
+                    L"are skipped.\n\n"
+                    L"An application can become unstable if it expects a closed handle to remain valid.",
+                    L"Try Force Unlock",
+                    L"Skip",
+                    false,
+                    true)) {
                 state->pendingAction = PendingAction::UnlockDeleteAfterForceUnlock;
                 SetStatus(state, L"Trying Force Unlock before process termination...");
                 std::wstring details;
@@ -1808,38 +2901,486 @@ bool HandlePendingActionAfterScan(AppState* state, const ScanResult& result) {
 
 std::wstring BuildCurrentDetails(const AppState* state) {
     if (!state) return {};
-    std::wstring text = state->lastStatusDetails;
-    if (!state->locks.empty()) {
-        if (!text.empty()) text += L"\n\n";
-        text += L"Detected blockers:";
+
+    std::wstring text = L"TARGET\n";
+    text += L"Path: " + (state->target.empty() ? std::wstring(L"(none)") : state->target);
+    text += L"\nType: ";
+    if (!state->lastTargetExists) {
+        text += L"(not available)";
+    } else {
+        text += state->lastTargetIsDirectory ? L"Directory" : L"File";
+    }
+
+    text += L"\n\nSCAN RESULT\n";
+    text += L"Status: " + (state->lastStatusDetails.empty()
+        ? std::wstring(L"No additional scan details are available.")
+        : state->lastStatusDetails);
+    text += L"\nDuration: " + std::to_wstring(state->lastScanDurationMs) + L" ms";
+    text += L"\nRestart Manager: ";
+    text += state->lastRestartManagerError == ERROR_SUCCESS
+        ? L"OK"
+        : ErrorMessage(state->lastRestartManagerError);
+    text += L"\nDisk handles inspected: " +
+        std::to_wstring(state->lastInspectedDiskHandleCount);
+    text += L"\nHandle type filter: ";
+    text += state->lastHandleTypeFilterAvailable
+        ? L"File ObjectTypeIndex detected"
+        : L"Unavailable / partial scan";
+    text += L"\nInaccessible file-handle owners (system-wide): " +
+        std::to_wstring(state->lastInaccessibleProcessCount);
+
+    text += L"\n\nBLOCKERS\n";
+    if (state->locks.empty()) {
+        text += L"None detected.";
+    } else {
+        text += std::to_wstring(state->locks.size()) +
+            (state->locks.size() == 1 ? L" process detected." : L" processes detected.");
         for (const auto& process : state->locks) {
             text += L"\n\n" + BuildProcessInfoText(process);
         }
     }
-    if (text.empty()) {
-        text = L"No additional scan details are available.";
-    }
     return text;
 }
 
+std::wstring BuildDiagnosticReport(const AppState* state) {
+    if (!state) return {};
+
+    std::wstring targetType = L"(unknown)";
+    if (state->lastTargetExists) {
+        targetType = state->lastTargetIsDirectory ? L"Directory" : L"File";
+    }
+
+    std::wstring deleteShare;
+    if (state->lastDeleteShareProbeSucceeded) {
+        deleteShare = L"Available";
+    } else if (state->lastDeleteShareProbeError == ERROR_SHARING_VIOLATION) {
+        deleteShare = L"Blocked (sharing violation)";
+    } else if (state->lastTargetExists) {
+        deleteShare = L"Unavailable: " + ErrorMessage(state->lastDeleteShareProbeError);
+    } else {
+        deleteShare = L"Not tested";
+    }
+
+    std::wstring report =
+        L"Genia Unlocker diagnostic report\r\n"
+        L"Version: " + std::wstring(kAppVersionDisplay) +
+        L"\r\nElevated: " + std::wstring(IsRunningElevated() ? L"Yes" : L"No") +
+        L"\r\nTarget: " + (state->target.empty() ? std::wstring(L"(none)") : state->target) +
+        L"\r\nTarget exists: " + std::wstring(state->lastTargetExists ? L"Yes" : L"No") +
+        L"\r\nTarget type: " + targetType +
+        L"\r\nBlocking processes: " + std::to_wstring(state->locks.size()) +
+        L"\r\nScan duration: " + std::to_wstring(state->lastScanDurationMs) + L" ms" +
+        L"\r\nDelete-share probe: " + deleteShare +
+        L"\r\nRestart Manager: " +
+            std::wstring(state->lastRestartManagerError == ERROR_SUCCESS
+                ? L"OK"
+                : ErrorMessage(state->lastRestartManagerError)) +
+        L"\r\nDisk handles inspected: " + std::to_wstring(state->lastInspectedDiskHandleCount) +
+        L"\r\nHandle type filter: " +
+            std::wstring(state->lastHandleTypeFilterAvailable ? L"File ObjectTypeIndex detected" : L"Unavailable / partial scan") +
+        L"\r\nInaccessible file-handle owners (system-wide): " +
+            std::to_wstring(state->lastInaccessibleProcessCount);
+
+    if (!state->lastStatusDetails.empty()) {
+        report += L"\r\n\r\nStatus details:\r\n" + state->lastStatusDetails;
+    }
+
+    if (!state->locks.empty()) {
+        report += L"\r\n\r\nDetected blockers:";
+        for (const auto& process : state->locks) {
+            report += L"\r\n\r\n" + process.name +
+                      L" (PID " + std::to_wstring(process.pid) + L")";
+            if (!process.path.empty()) {
+                report += L"\r\nExecutable: " + process.path;
+            }
+
+            std::wstring method;
+            if (process.foundByRestartManager) method += L"Restart Manager";
+            if (process.foundByHandleScan) {
+                if (!method.empty()) method += L" + ";
+                method += L"Handle";
+            }
+            if (process.foundByProcessImageScan) {
+                if (!method.empty()) method += L" + ";
+                method += L"Image/Module";
+            }
+            if (!method.empty()) {
+                report += L"\r\nDetection: " + method;
+            }
+
+            if (!process.lockedObjects.empty()) {
+                report += L"\r\nLocked objects:";
+                for (const auto& object : process.lockedObjects) {
+                    report += L"\r\n  - " + object;
+                }
+            }
+        }
+    }
+
+    report += L"\r\n\r\nSource: " + std::wstring(kRepositoryUrl);
+    return report;
+}
+
+
+struct DetailsState {
+    AppState* app{};
+    HWND closeButton{};
+    HWND copyButton{};
+    HWND edit{};
+    HFONT font{};
+    HFONT titleFont{};
+    std::wstring detailsText;
+    std::wstring reportText;
+};
+
+std::wstring ToEditText(std::wstring text) {
+    std::wstring converted;
+    converted.reserve(text.size() + 32);
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == L'\n' && (i == 0 || text[i - 1] != L'\r')) {
+            converted += L'\r';
+        }
+        converted += text[i];
+    }
+    return converted;
+}
+
+LRESULT CALLBACK DetailsWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* details = reinterpret_cast<DetailsState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        details = reinterpret_cast<DetailsState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(details));
+    }
+
+    AppState* app = details ? details->app : nullptr;
+    switch (msg) {
+    case WM_CREATE: {
+        if (!details || !app) return -1;
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+        details->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+        details->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
+
+        details->closeButton = CreateWindowW(
+            L"BUTTON", L"×",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(548), sc(5), sc(24), sc(22), hwnd,
+            ControlId(IDC_DETAILS_CLOSE), nullptr, nullptr);
+
+        details->edit = CreateWindowExW(
+            0, L"EDIT", ToEditText(details->detailsText).c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_BORDER |
+            ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            sc(16), sc(58), sc(556), sc(260), hwnd,
+            ControlId(IDC_DETAILS_EDIT), nullptr, nullptr);
+
+        details->copyButton = CreateWindowW(
+            L"BUTTON", L"Copy report",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(16), sc(330), sc(104), sc(30), hwnd,
+            ControlId(IDC_DETAILS_COPY), nullptr, nullptr);
+        HWND close = CreateWindowW(
+            L"BUTTON", L"Close",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            sc(496), sc(330), sc(76), sc(30), hwnd,
+            ControlId(IDCANCEL), nullptr, nullptr);
+
+        for (HWND control : {details->closeButton, details->edit,
+                             details->copyButton, close}) {
+            SetFont(control, details->font);
+            ModernTheme::ApplyControlTheme(control, app->palette.dark);
+        }
+
+        SendMessageW(details->edit, EM_SETSEL, 0, 0);
+        ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
+        return 0;
+    }
+
+    case WM_ERASEBKGND:
+        if (app && app->windowBrush) {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(reinterpret_cast<HDC>(wParam), &rc, app->windowBrush);
+            return 1;
+        }
+        break;
+
+    case WM_PAINT:
+        if (details && app) {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+            HGDIOBJ oldFont = details->font ? SelectObject(dc, details->font) : nullptr;
+
+            RECT captionRc{sc(10), sc(3), rc.right - sc(48), sc(29)};
+            DrawTextW(dc, L"Genia Unlocker — Details", -1, &captionRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            if (oldFont) SelectObject(dc, oldFont);
+            oldFont = details->titleFont ? SelectObject(dc, details->titleFont) : nullptr;
+            RECT titleRc{sc(16), sc(34), rc.right - sc(16), sc(56)};
+            DrawTextW(dc, L"Scan details", -1, &titleRc,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            if (oldFont) SelectObject(dc, oldFont);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        break;
+
+    case WM_CTLCOLORSTATIC:
+        if (app) {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            HWND control = reinterpret_cast<HWND>(lParam);
+            if (control && GetDlgCtrlID(control) == IDC_DETAILS_EDIT) {
+                SetTextColor(dc, app->palette.text);
+                SetBkColor(dc, app->palette.surface);
+                return reinterpret_cast<LRESULT>(app->surfaceBrush);
+            }
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+            return reinterpret_cast<LRESULT>(app->windowBrush);
+        }
+        break;
+
+    case WM_CTLCOLOREDIT:
+        if (app) {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(dc, app->palette.text);
+            SetBkColor(dc, app->palette.surface);
+            return reinterpret_cast<LRESULT>(app->surfaceBrush);
+        }
+        break;
+
+    case WM_CTLCOLORBTN:
+        if (app) {
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, app->palette.text);
+            return reinterpret_cast<LRESULT>(app->windowBrush);
+        }
+        break;
+
+    case WM_DRAWITEM:
+        if (app) {
+            const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (draw && draw->CtlType == ODT_BUTTON) {
+                ModernTheme::ButtonKind kind =
+                    draw->CtlID == IDC_DETAILS_COPY
+                        ? ModernTheme::ButtonKind::Primary
+                        : ModernTheme::ButtonKind::Secondary;
+                ModernTheme::DrawButton(*draw, app->palette, kind);
+                return TRUE;
+            }
+        }
+        break;
+
+    case WM_COMMAND:
+        if (!details || !app) break;
+        switch (LOWORD(wParam)) {
+        case IDC_DETAILS_CLOSE:
+        case IDCANCEL:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        case IDC_DETAILS_COPY:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                if (CopyTextToClipboard(hwnd, details->reportText)) {
+                    SetWindowTextW(details->copyButton, L"Copied");
+                    SetStatus(app, L"Diagnostic report copied to the clipboard.");
+                    InvalidateRect(details->copyButton, nullptr, TRUE);
+                } else {
+                    MessageBoxW(hwnd, L"Could not copy the diagnostic report.",
+                                kWindowTitle, MB_ICONERROR);
+                }
+            }
+            return 0;
+        }
+        break;
+
+    case WM_DPICHANGED:
+        if (details && app) {
+            const int dpi = HIWORD(wParam) > 0 ? HIWORD(wParam) : 96;
+            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr,
+                             suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            auto sc = [dpi](int px) { return MulDiv(px, dpi, 96); };
+
+            if (details->font) DeleteObject(details->font);
+            if (details->titleFont) DeleteObject(details->titleFont);
+            details->font = CreateModernFont(dpi, 9, FW_NORMAL, L"Segoe UI Variable Text");
+            details->titleFont = CreateModernFont(dpi, 13, FW_SEMIBOLD, L"Segoe UI Variable Display");
+
+            MoveWindow(details->closeButton, sc(548), sc(5), sc(24), sc(22), TRUE);
+            MoveWindow(details->edit, sc(16), sc(58), sc(556), sc(260), TRUE);
+            MoveWindow(details->copyButton, sc(16), sc(330), sc(104), sc(30), TRUE);
+            MoveWindow(GetDlgItem(hwnd, IDCANCEL), sc(496), sc(330), sc(76), sc(30), TRUE);
+
+            for (HWND control : {details->closeButton, details->edit,
+                                 details->copyButton, GetDlgItem(hwnd, IDCANCEL)}) {
+                SetFont(control, details->font);
+            }
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        if (app) {
+            ModernTheme::ApplyWindowChrome(hwnd, app->palette.dark);
+            ModernTheme::ApplyControlTheme(details->edit, app->palette.dark);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+
+    case WM_NCHITTEST: {
+        POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (details && details->closeButton) {
+            RECT closeRc{};
+            GetWindowRect(details->closeButton, &closeRc);
+            if (PtInRect(&closeRc, pt)) {
+                return HTCLIENT;
+            }
+        }
+        RECT windowRc{};
+        GetWindowRect(hwnd, &windowRc);
+        const int dpi = GetDpiForWindow(hwnd) > 0 ? GetDpiForWindow(hwnd) : 96;
+        const int captionHeight = MulDiv(32, dpi, 96);
+        if (pt.y >= windowRc.top && pt.y < windowRc.top + captionHeight) {
+            return HTCAPTION;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        if (app && app->detailsWindow == hwnd) {
+            app->detailsWindow = nullptr;
+        }
+        if (details) {
+            if (details->font) DeleteObject(details->font);
+            if (details->titleFont) DeleteObject(details->titleFont);
+        }
+        delete details;
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void ShowDetailsWindow(AppState* state) {
+    if (!state || !state->hwnd) return;
+
+    if (state->detailsWindow && IsWindow(state->detailsWindow)) {
+        auto* details = reinterpret_cast<DetailsState*>(
+            GetWindowLongPtrW(state->detailsWindow, GWLP_USERDATA));
+        if (details) {
+            details->detailsText = BuildCurrentDetails(state);
+            details->reportText = BuildDiagnosticReport(state);
+            if (details->edit) {
+                const std::wstring editText = ToEditText(details->detailsText);
+                SetWindowTextW(details->edit, editText.c_str());
+                SendMessageW(details->edit, EM_SETSEL, 0, 0);
+            }
+            if (details->copyButton) {
+                SetWindowTextW(details->copyButton, L"Copy report");
+            }
+        }
+        ShowWindow(state->detailsWindow, SW_RESTORE);
+        SetForegroundWindow(state->detailsWindow);
+        return;
+    }
+
+    HINSTANCE instance = reinterpret_cast<HINSTANCE>(
+        GetWindowLongPtrW(state->hwnd, GWLP_HINSTANCE));
+    static bool classReady = false;
+    if (!classReady) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = DetailsWindowProc;
+        wc.hInstance = instance;
+        wc.hIcon = state->icon;
+        wc.hIconSm = state->icon;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = kDetailsWindowClass;
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            MessageBoxW(state->hwnd, L"Could not create the Details window.",
+                        kWindowTitle, MB_ICONERROR);
+            return;
+        }
+        classReady = true;
+    }
+
+    const int dpi = GetDpiForWindow(state->hwnd) > 0 ? GetDpiForWindow(state->hwnd) : 96;
+    const int width = MulDiv(588, dpi, 96);
+    const int height = MulDiv(374, dpi, 96);
+    RECT owner{};
+    GetWindowRect(state->hwnd, &owner);
+    const int x = owner.left + ((owner.right - owner.left) - width) / 2;
+    const int y = owner.top + ((owner.bottom - owner.top) - height) / 2;
+
+    auto* details = new DetailsState{};
+    details->app = state;
+    details->detailsText = BuildCurrentDetails(state);
+    details->reportText = BuildDiagnosticReport(state);
+
+    HWND window = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        kDetailsWindowClass,
+        L"Genia Unlocker — Details",
+        WS_POPUP | WS_BORDER,
+        x, y, width, height,
+        state->hwnd, nullptr, instance, details);
+    if (!window) {
+        delete details;
+        MessageBoxW(state->hwnd, L"Could not open scan details.",
+                    kWindowTitle, MB_ICONERROR);
+        return;
+    }
+
+    state->detailsWindow = window;
+    ShowWindow(window, SW_SHOWNORMAL);
+    UpdateWindow(window);
+}
+
 void LayoutControls(AppState* state, int width, int height) {
-    const int margin = Scale(state, 14);
-    const int gap = Scale(state, 7);
-    const int buttonH = Scale(state, 30);
-    const int chooseFileW = Scale(state, 78);
-    const int chooseFolderW = Scale(state, 86);
-    const int settingsW = Scale(state, 88);
+    // Flat UX uses tighter rhythm and lets whitespace, rather than raised
+    // containers, separate the title, target, process list and actions.
+    const int margin = Scale(state, 12);
+    const int gap = Scale(state, 6);
+    const int buttonH = Scale(state, 28);
+    const int chooseFileW = Scale(state, 72);
+    const int chooseFolderW = Scale(state, 80);
+    const int settingsW = Scale(state, 78);
 
-    int y = Scale(state, 10);
+    int y = Scale(state, 9);
     MoveWindow(GetDlgItem(state->hwnd, IDC_APP_TITLE), margin, y,
-               width - margin * 2 - settingsW - gap, Scale(state, 26), TRUE);
+               width - margin * 2 - settingsW - gap, Scale(state, 24), TRUE);
     MoveWindow(GetDlgItem(state->hwnd, IDC_SETTINGS), width - margin - settingsW, y,
-               settingsW, Scale(state, 26), TRUE);
+               settingsW, Scale(state, 24), TRUE);
 
-    y += Scale(state, 32);
+    y += Scale(state, 29);
     MoveWindow(GetDlgItem(state->hwnd, IDC_TARGET_LABEL), margin, y,
-               Scale(state, 86), Scale(state, 16), TRUE);
-    y += Scale(state, 17);
+               Scale(state, 80), Scale(state, 15), TRUE);
+    y += Scale(state, 16);
 
     int targetW = width - margin * 2 - chooseFileW - chooseFolderW - gap * 2;
     if (targetW < Scale(state, 210)) targetW = Scale(state, 210);
@@ -1851,20 +3392,20 @@ void LayoutControls(AppState* state, int width, int height) {
                margin + targetW + gap + chooseFileW + gap, y,
                chooseFolderW, buttonH, TRUE);
 
-    const int listTop = y + buttonH + Scale(state, 8);
-    const int bottomArea = Scale(state, 72);
+    const int listTop = y + buttonH + Scale(state, 7);
+    const int bottomArea = Scale(state, 66);
     int listHeight = height - listTop - bottomArea;
-    if (listHeight < Scale(state, 150)) listHeight = Scale(state, 150);
+    if (listHeight < Scale(state, 145)) listHeight = Scale(state, 145);
     const int listW = width - margin * 2;
     MoveWindow(state->list, margin, listTop, listW, listHeight, TRUE);
     UpdateListColumns(state, listW);
 
-    const int actionsY = listTop + listHeight + Scale(state, 7);
-    const int unlockW = Scale(state, 74);
-    const int forceW = Scale(state, 96);
-    const int terminateW = Scale(state, 84);
-    const int destructiveW = Scale(state, 120);
-    const int retryW = Scale(state, 92);
+    const int actionsY = listTop + listHeight + Scale(state, 6);
+    const int unlockW = Scale(state, 70);
+    const int forceW = Scale(state, 92);
+    const int terminateW = Scale(state, 80);
+    const int destructiveW = Scale(state, 114);
+    const int retryW = Scale(state, 88);
 
     int actionX = margin;
     MoveWindow(GetDlgItem(state->hwnd, IDC_UNLOCK), actionX, actionsY,
@@ -1884,11 +3425,11 @@ void LayoutControls(AppState* state, int width, int height) {
                retryW, buttonH, TRUE);
 
     const int statusY = actionsY + buttonH + Scale(state, 5);
-    const int detailsW = Scale(state, 58);
+    const int detailsW = Scale(state, 60);
     MoveWindow(state->status, margin, statusY,
-               width - margin * 2 - detailsW - gap, Scale(state, 18), TRUE);
+               width - margin * 2 - detailsW - gap, Scale(state, 17), TRUE);
     MoveWindow(GetDlgItem(state->hwnd, IDC_DETAILS), width - margin - detailsW,
-               statusY - Scale(state, 2), detailsW, Scale(state, 22), TRUE);
+               statusY - Scale(state, 2), detailsW, Scale(state, 21), TRUE);
 }
 
 void CreateControls(AppState* state) {
@@ -1899,23 +3440,42 @@ void CreateControls(AppState* state) {
     CreateWindowW(L"STATIC", L"Genia Unlocker",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_APP_TITLE), nullptr, nullptr);
-    CreateWindowW(L"BUTTON", L"⚙ Settings",
+    CreateWindowW(L"BUTTON", L"Settings",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_SETTINGS), nullptr, nullptr);
     CreateWindowW(L"STATIC", L"Target",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_TARGET_LABEL), nullptr, nullptr);
 
-    state->targetEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOHSCROLL | ES_READONLY,
+    state->targetEdit = CreateWindowExW(0, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER |
+        ES_MULTILINE | ES_AUTOHSCROLL | ES_READONLY,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_TARGET), nullptr, nullptr);
+
+    state->targetTooltip = CreateWindowExW(
+        WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        state->hwnd, nullptr, nullptr, nullptr);
+    if (state->targetTooltip) {
+        TOOLINFOW tool{};
+        tool.cbSize = sizeof(tool);
+        tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        tool.hwnd = state->hwnd;
+        tool.uId = reinterpret_cast<UINT_PTR>(state->targetEdit);
+        tool.lpszText = LPSTR_TEXTCALLBACKW;
+        SendMessageW(state->targetTooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+        SendMessageW(state->targetTooltip, TTM_SETMAXTIPWIDTH, 0, Scale(state, 760));
+    }
+
     CreateWindowW(L"BUTTON", L"File...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_FILE), nullptr, nullptr);
     CreateWindowW(L"BUTTON", L"Folder...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_FOLDER), nullptr, nullptr);
 
-    state->list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+    state->list = CreateWindowExW(0, WC_LISTVIEWW, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER |
+        LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
         0, 0, 0, 0, state->hwnd, ControlId(IDC_LIST), nullptr, nullptr);
     ListView_SetExtendedListViewStyle(state->list,
         LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP | LVS_EX_INFOTIP | LVS_EX_HEADERDRAGDROP);
@@ -1931,6 +3491,11 @@ void CreateControls(AppState* state) {
         col.cx = Scale(state, columns[i].width);
         col.iSubItem = i;
         ListView_InsertColumn(state->list, i, &col);
+    }
+
+    if (HWND header = ListView_GetHeader(state->list)) {
+        SetWindowSubclass(header, FlatHeaderSubclassProc, 1,
+                          reinterpret_cast<DWORD_PTR>(state));
     }
 
     CreateWindowW(L"BUTTON", L"Unlock", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
@@ -2041,8 +3606,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_GETMINMAXINFO:
         if (state) {
             auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
-            info->ptMinTrackSize.x = Scale(state, 720);
-            info->ptMinTrackSize.y = Scale(state, 400);
+            info->ptMinTrackSize.x = Scale(state, 700);
+            info->ptMinTrackSize.y = Scale(state, 380);
             return 0;
         }
         break;
@@ -2055,6 +3620,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DPICHANGED:
         if (state) {
+            CaptureColumnWidths(state);
+            state->columnsInitialized = false;
             state->dpi = HIWORD(wParam);
             if (state->dpi <= 0) state->dpi = 96;
             RecreateFonts(state);
@@ -2114,8 +3681,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         } else if (id == IDC_SETTINGS) {
             ShowSettingsWindow(state);
         } else if (id == IDC_DETAILS) {
-            const std::wstring details = BuildCurrentDetails(state);
-            MessageBoxW(hwnd, details.c_str(), L"Scan details", MB_ICONINFORMATION);
+            ShowDetailsWindow(state);
+        } else if (id == ID_TRAY_ABOUT) {
+            ShowAboutDialog(state);
         } else if (id == ID_TRAY_EXIT) {
             state->exiting = true;
             DestroyWindow(hwnd);
@@ -2128,6 +3696,66 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_NOTIFY: {
         if (state) {
             const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+
+            if (header && header->hwndFrom == state->targetTooltip &&
+                header->code == TTN_GETDISPINFOW) {
+                auto* tip = reinterpret_cast<NMTTDISPINFOW*>(lParam);
+                tip->lpszText = state->target.empty()
+                    ? const_cast<LPWSTR>(L"No target selected")
+                    : const_cast<LPWSTR>(state->target.c_str());
+                return 0;
+            }
+
+            const HWND listHeader = state->list ? ListView_GetHeader(state->list) : nullptr;
+            if (header && listHeader && header->hwndFrom == listHeader &&
+                (header->code == HDN_ENDTRACKW || header->code == HDN_ENDTRACKA)) {
+                CaptureColumnWidths(state);
+                SaveLayoutPreferences(state);
+            }
+            if (header && listHeader && header->hwndFrom == listHeader &&
+                header->code == NM_CUSTOMDRAW) {
+                auto* custom = reinterpret_cast<NMCUSTOMDRAW*>(lParam);
+                if (custom->dwDrawStage == CDDS_PREPAINT) {
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+                if (custom->dwDrawStage == CDDS_ITEMPREPAINT) {
+                    const int itemIndex = static_cast<int>(custom->dwItemSpec);
+                    wchar_t textBuffer[128]{};
+                    HDITEMW item{};
+                    item.mask = HDI_TEXT;
+                    item.pszText = textBuffer;
+                    item.cchTextMax = static_cast<int>(_countof(textBuffer));
+                    Header_GetItem(listHeader, itemIndex, &item);
+
+                    const COLORREF fill = (custom->uItemState & CDIS_SELECTED)
+                        ? state->palette.surfacePressed
+                        : state->palette.surface;
+                    HBRUSH brush = CreateSolidBrush(fill);
+                    FillRect(custom->hdc, &custom->rc, brush);
+                    DeleteObject(brush);
+
+                    HPEN pen = CreatePen(PS_SOLID, 1, state->palette.border);
+                    HGDIOBJ oldPen = SelectObject(custom->hdc, pen);
+                    MoveToEx(custom->hdc, custom->rc.right - 1, custom->rc.top, nullptr);
+                    LineTo(custom->hdc, custom->rc.right - 1, custom->rc.bottom);
+                    MoveToEx(custom->hdc, custom->rc.left, custom->rc.bottom - 1, nullptr);
+                    LineTo(custom->hdc, custom->rc.right, custom->rc.bottom - 1);
+                    SelectObject(custom->hdc, oldPen);
+                    DeleteObject(pen);
+
+                    SetBkMode(custom->hdc, TRANSPARENT);
+                    SetTextColor(custom->hdc, state->palette.text);
+                    HGDIOBJ oldFont = state->font ? SelectObject(custom->hdc, state->font) : nullptr;
+                    RECT textRc = custom->rc;
+                    textRc.left += Scale(state, 8);
+                    textRc.right -= Scale(state, 6);
+                    DrawTextW(custom->hdc, textBuffer, -1, &textRc,
+                              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    if (oldFont) SelectObject(custom->hdc, oldFont);
+                    return CDRF_SKIPDEFAULT;
+                }
+            }
+
             if (header && header->idFrom == IDC_LIST) {
                 if (header->code == LVN_ITEMCHANGED) {
                     UpdateActionButtons(state);
@@ -2167,13 +3795,22 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         ScanResult& result = payload->result;
         state->scanInProgress = false;
+        state->lastScanDurationMs = payload->elapsedMs;
         state->lastTargetExists = result.targetExists;
         state->lastTargetIsDirectory = result.targetIsDirectory;
         state->lastInaccessibleProcessCount = result.inaccessibleProcessCount;
+        state->lastRestartManagerError = result.restartManagerError;
+        state->lastInspectedDiskHandleCount = result.inspectedDiskHandleCount;
+        state->lastDeleteShareProbeError = result.deleteShareProbeError;
+        state->lastHandleTypeFilterAvailable = result.handleTypeFilterAvailable;
+        state->lastDeleteShareProbeSucceeded = result.deleteShareProbeSucceeded;
         state->locks = std::move(result.processes);
         PopulateList(state);
 
-        if (result.inaccessibleProcessCount != 0 && !IsRunningElevated()) {
+        const bool unidentifiedSharingLock =
+            state->locks.empty() &&
+            result.deleteShareProbeError == ERROR_SHARING_VIOLATION;
+        if (unidentifiedSharingLock && !IsRunningElevated()) {
             SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Scan as Admin");
         } else {
             SetWindowTextW(GetDlgItem(hwnd, IDC_RETRY), L"Rescan");
@@ -2188,25 +3825,56 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!result.targetExists) {
             SetStatus(state, L"The selected path no longer exists.");
         } else if (state->locks.empty()) {
-            if (result.inaccessibleProcessCount != 0) {
-                std::wstring details = L"No lock found, but " +
-                    std::to_wstring(result.inaccessibleProcessCount) +
-                    (result.inaccessibleProcessCount == 1
-                        ? L" process owning file handles could not be inspected."
-                        : L" processes owning file handles could not be inspected.");
+            if (result.deleteShareProbeError == ERROR_SHARING_VIOLATION) {
+                std::wstring details =
+                    L"Windows confirms that delete sharing is blocked for this target, "
+                    L"but the owning process was not identified by Restart Manager or the native handle scan.";
+                if (result.inaccessibleProcessCount != 0) {
+                    details += L" " + std::to_wstring(result.inaccessibleProcessCount) +
+                        (result.inaccessibleProcessCount == 1
+                            ? L" file-handle owner could not be inspected."
+                            : L" file-handle owners could not be inspected.");
+                }
                 if (!IsRunningElevated()) {
-                    details += L" Run Scan as Admin to rescan with elevated rights.";
-                    SetStatusWithDetails(state, L"No lock found — administrator scan recommended.", details);
+                    details += L" Scan as Admin may identify an elevated owner.";
+                    SetStatusWithDetails(state, L"Locked — blocker not identified. Administrator scan recommended.", details);
                 } else {
-                    details += L" These are protected system processes that remain inaccessible even when elevated.";
-                    SetStatusWithDetails(state, L"No lock found — some protected processes remain inaccessible.", details);
+                    SetStatusWithDetails(state, L"Locked — blocker not identified.", details);
+                }
+            } else if (result.deleteShareProbeSucceeded) {
+                std::wstring details;
+                if (result.inaccessibleProcessCount != 0) {
+                    details = std::to_wstring(result.inaccessibleProcessCount) +
+                        (result.inaccessibleProcessCount == 1
+                            ? L" system-wide file-handle owner could not be inspected."
+                            : L" system-wide file-handle owners could not be inspected.") +
+                        L" Delete sharing is available for the selected target, so these are not treated as target blockers.";
+                }
+                if (!result.handleTypeFilterAvailable) {
+                    if (!details.empty()) details += L" ";
+                    details += L"Native File ObjectTypeIndex filtering was unavailable, so handle-scan coverage is partial.";
+                }
+                if (details.empty()) {
+                    SetStatus(state, L"✓ No locking processes detected · " +
+                        std::to_wstring(state->lastScanDurationMs) + L" ms");
+                } else {
+                    SetStatusWithDetails(state,
+                        L"✓ No locking processes detected · " +
+                            std::to_wstring(state->lastScanDurationMs) + L" ms",
+                        details);
                 }
             } else {
-                SetStatus(state, L"No locking processes detected.");
+                std::wstring details = L"No blocker was detected, but delete-share verification failed: " +
+                    ErrorMessage(result.deleteShareProbeError);
+                if (!result.handleTypeFilterAvailable) {
+                    details += L" Native handle-scan coverage is partial.";
+                }
+                SetStatusWithDetails(state, L"No blocker detected — verification incomplete.", details);
             }
         } else {
             std::wstring shortText = L"\u25CF " + std::to_wstring(state->locks.size()) +
-                (state->locks.size() == 1 ? L" locking process" : L" locking processes");
+                (state->locks.size() == 1 ? L" locking process" : L" locking processes") +
+                L" · " + std::to_wstring(state->lastScanDurationMs) + L" ms";
             size_t lockedObjectCount = 0;
             for (const auto& process : state->locks) {
                 lockedObjectCount += process.lockedObjects.size();
@@ -2220,9 +3888,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             if (result.restartManagerError != ERROR_SUCCESS) {
                 details += L" Handle scan completed; Restart Manager did not accept this resource.";
-            }
-            if (result.inaccessibleProcessCount != 0) {
-                details += L" Some protected/elevated file-handle owners could not be inspected.";
             }
             SetStatusWithDetails(state, shortText, details);
         }
@@ -2257,6 +3922,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DESTROY:
         if (state) {
+            SaveLayoutPreferences(state);
+            if (state->detailsWindow && IsWindow(state->detailsWindow)) {
+                DestroyWindow(state->detailsWindow);
+                state->detailsWindow = nullptr;
+            }
+            if (state->aboutWindow && IsWindow(state->aboutWindow)) {
+                DestroyWindow(state->aboutWindow);
+                state->aboutWindow = nullptr;
+            }
             if (state->settingsWindow && IsWindow(state->settingsWindow)) {
                 DestroyWindow(state->settingsWindow);
                 state->settingsWindow = nullptr;
@@ -2417,6 +4091,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
 
     AppState state;
     state.permanentDeleteDefault = LoadPermanentDeleteDefault();
+    LoadLayoutPreferences(state);
     state.icon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
                                                0, 0, LR_DEFAULTSIZE));
     if (!state.icon) {
@@ -2439,9 +4114,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         return 1;
     }
 
+    const int startupDpi = GetDpiForSystem() > 0 ? static_cast<int>(GetDpiForSystem()) : 96;
+    const int startupWidth = MulDiv(state.restoredWindowWidth, startupDpi, 96);
+    const int startupHeight = MulDiv(state.restoredWindowHeight, startupDpi, 96);
     HWND hwnd = CreateWindowExW(0, kWindowClass, kWindowTitle,
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-        CW_USEDEFAULT, CW_USEDEFAULT, 780, 460,
+        CW_USEDEFAULT, CW_USEDEFAULT, startupWidth, startupHeight,
         nullptr, nullptr, instance, &state);
     if (!hwnd) {
         if (mutex) CloseHandle(mutex);

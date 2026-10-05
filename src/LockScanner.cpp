@@ -36,48 +36,25 @@ struct SYSTEM_HANDLE_INFORMATION_EX_LOCAL {
     SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX_LOCAL Handles[1];
 };
 
-USHORT DetectFileObjectTypeIndex(const SYSTEM_HANDLE_INFORMATION_EX_LOCAL* info) {
-    if (!info) {
+USHORT DetectFileObjectTypeIndex(const SYSTEM_HANDLE_INFORMATION_EX_LOCAL* info,
+                                 ULONG_PTR probeValue) {
+    if (!info || probeValue == 0) {
         return 0;
     }
 
-    // SystemExtendedHandleInformation exposes an ObjectTypeIndex but does not
-    // provide its name. Open one file handle that belongs to this process and
-    // find the matching table entry. This lets the main scan ignore mutexes,
-    // events, registry keys, sections, etc. before asking for PROCESS_DUP_HANDLE.
-    // Besides being much faster, this prevents harmless protected processes
-    // from being reported as an incomplete *file* scan.
-    wchar_t modulePath[32768]{};
-    DWORD length = GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(_countof(modulePath)));
-    if (length == 0 || length >= _countof(modulePath)) {
-        return 0;
-    }
-
-    HANDLE probe = CreateFileW(modulePath,
-                               FILE_READ_ATTRIBUTES,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                               nullptr,
-                               OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL,
-                               nullptr);
-    if (probe == INVALID_HANDLE_VALUE) {
-        return 0;
-    }
-
+    // The probe must exist when SystemExtendedHandleInformation is captured.
+    // Earlier builds opened it after the snapshot, so this lookup usually
+    // failed and unrelated protected processes were counted as inaccessible
+    // file-handle owners.
     const DWORD currentPid = GetCurrentProcessId();
-    const ULONG_PTR probeValue = reinterpret_cast<ULONG_PTR>(probe);
-    USHORT typeIndex = 0;
     for (ULONG_PTR i = 0; i < info->NumberOfHandles; ++i) {
         const auto& entry = info->Handles[i];
         if (static_cast<DWORD>(entry.UniqueProcessId) == currentPid &&
             entry.HandleValue == probeValue) {
-            typeIndex = entry.ObjectTypeIndex;
-            break;
+            return entry.ObjectTypeIndex;
         }
     }
-
-    CloseHandle(probe);
-    return typeIndex;
+    return 0;
 }
 
 struct FileIdentity {
@@ -133,6 +110,30 @@ HANDLE OpenTargetForMetadata(const std::wstring& target, bool isDirectory) {
                        OPEN_EXISTING,
                        flags,
                        nullptr);
+}
+
+void ProbeDeleteSharing(const std::wstring& target,
+                        bool isDirectory,
+                        bool& succeeded,
+                        DWORD& error) {
+    succeeded = false;
+    error = ERROR_SUCCESS;
+
+    const DWORD flags = isDirectory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
+    HANDLE probe = CreateFileW(target.c_str(),
+                               DELETE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr,
+                               OPEN_EXISTING,
+                               flags,
+                               nullptr);
+    if (probe == INVALID_HANDLE_VALUE) {
+        error = GetLastError();
+        return;
+    }
+
+    succeeded = true;
+    CloseHandle(probe);
 }
 
 std::wstring ToLower(std::wstring value) {
@@ -310,28 +311,42 @@ DWORD ScanRestartManager(const std::wstring& target, std::unordered_map<DWORD, L
     UINT needed = 0;
     UINT count = 0;
     DWORD rebootReasons = 0;
-    rc = RmGetList(session, &needed, &count, nullptr, &rebootReasons);
-    if (rc == ERROR_SUCCESS && needed == 0) {
-        RmEndSession(session);
-        return ERROR_SUCCESS;
-    }
-    if (rc != ERROR_MORE_DATA) {
-        RmEndSession(session);
-        return rc;
-    }
 
-    std::vector<RM_PROCESS_INFO> infos(needed);
-    count = needed;
-    rc = RmGetList(session, &needed, &count, infos.data(), &rebootReasons);
-    if (rc == ERROR_SUCCESS) {
-        for (UINT i = 0; i < count; ++i) {
-            MergeProcess(processes,
-                         infos[i].Process.dwProcessId,
-                         true,
-                         false,
-                         false,
-                         infos[i].strAppName,
-                         target);
+    // The list can change between the sizing call and the data call.
+    // Retry rather than losing a blocker if the second call also reports
+    // ERROR_MORE_DATA (Office applications can make this race visible).
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        needed = 0;
+        count = 0;
+        rc = RmGetList(session, &needed, &count, nullptr, &rebootReasons);
+        if (rc == ERROR_SUCCESS && needed == 0) {
+            RmEndSession(session);
+            return ERROR_SUCCESS;
+        }
+        if (rc != ERROR_MORE_DATA) {
+            RmEndSession(session);
+            return rc;
+        }
+
+        std::vector<RM_PROCESS_INFO> infos(needed);
+        count = needed;
+        rc = RmGetList(session, &needed, &count, infos.data(), &rebootReasons);
+        if (rc == ERROR_SUCCESS) {
+            for (UINT i = 0; i < count; ++i) {
+                MergeProcess(processes,
+                             infos[i].Process.dwProcessId,
+                             true,
+                             false,
+                             false,
+                             infos[i].strAppName,
+                             target);
+            }
+            RmEndSession(session);
+            return ERROR_SUCCESS;
+        }
+        if (rc != ERROR_MORE_DATA) {
+            RmEndSession(session);
+            return rc;
         }
     }
 
@@ -419,6 +434,7 @@ void ScanSystemHandles(const std::wstring& normalizedTarget,
                        bool targetIsDirectory,
                        DWORD& inaccessibleProcessCount,
                        DWORD& inspectedDiskHandleCount,
+                       bool& handleTypeFilterAvailable,
                        std::unordered_map<DWORD, LockProcess>& processes) {
     EnableDebugPrivilegeBestEffort();
 
@@ -431,6 +447,22 @@ void ScanSystemHandles(const std::wstring& normalizedTarget,
         GetProcAddress(ntdll, "NtQuerySystemInformation"));
     if (!ntQuerySystemInformation) {
         return;
+    }
+
+    // Open the probe BEFORE taking the system handle snapshot so its handle
+    // value is present in that snapshot.
+    wchar_t modulePath[32768]{};
+    HANDLE fileTypeProbe = INVALID_HANDLE_VALUE;
+    const DWORD moduleLength = GetModuleFileNameW(
+        nullptr, modulePath, static_cast<DWORD>(_countof(modulePath)));
+    if (moduleLength != 0 && moduleLength < _countof(modulePath)) {
+        fileTypeProbe = CreateFileW(modulePath,
+                                    FILE_READ_ATTRIBUTES,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    nullptr,
+                                    OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL,
+                                    nullptr);
     }
 
     ULONG size = 1u << 20;
@@ -450,11 +482,22 @@ void ScanSystemHandles(const std::wstring& normalizedTarget,
         buffer.resize(size);
     }
     if (status < 0) {
+        if (fileTypeProbe != INVALID_HANDLE_VALUE) {
+            CloseHandle(fileTypeProbe);
+        }
         return;
     }
 
     const auto* info = reinterpret_cast<const SYSTEM_HANDLE_INFORMATION_EX_LOCAL*>(buffer.data());
-    const USHORT fileObjectTypeIndex = DetectFileObjectTypeIndex(info);
+    const ULONG_PTR probeValue = fileTypeProbe != INVALID_HANDLE_VALUE
+        ? reinterpret_cast<ULONG_PTR>(fileTypeProbe)
+        : 0;
+    const USHORT fileObjectTypeIndex = DetectFileObjectTypeIndex(info, probeValue);
+    handleTypeFilterAvailable = fileObjectTypeIndex != 0;
+    if (fileTypeProbe != INVALID_HANDLE_VALUE) {
+        CloseHandle(fileTypeProbe);
+    }
+
     std::unordered_map<DWORD, HANDLE> processHandles;
     std::unordered_set<DWORD> inaccessiblePids;
 
@@ -489,7 +532,11 @@ void ScanSystemHandles(const std::wstring& normalizedTarget,
             // here. Duplication is all the scanner needs, and asking for extra
             // rights caused otherwise inspectable processes to be skipped.
             process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid);
-            if (!process && GetLastError() == ERROR_ACCESS_DENIED) {
+            if (!process && GetLastError() == ERROR_ACCESS_DENIED &&
+                handleTypeFilterAvailable) {
+                // With a known File ObjectTypeIndex, this PID really owns at
+                // least one file handle we could not inspect. Without that
+                // filter, counting it would be diagnostic noise.
                 inaccessiblePids.insert(pid);
             }
             processHandles.emplace(pid, process);
@@ -731,6 +778,22 @@ ForceUnlockResult ForceUnlockHandles(const std::wstring& target) {
         return result;
     }
 
+    // Keep a known file handle open while taking the snapshot so the
+    // File ObjectTypeIndex can be identified reliably here too.
+    wchar_t modulePath[32768]{};
+    HANDLE fileTypeProbe = INVALID_HANDLE_VALUE;
+    const DWORD moduleLength = GetModuleFileNameW(
+        nullptr, modulePath, static_cast<DWORD>(_countof(modulePath)));
+    if (moduleLength != 0 && moduleLength < _countof(modulePath)) {
+        fileTypeProbe = CreateFileW(modulePath,
+                                    FILE_READ_ATTRIBUTES,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    nullptr,
+                                    OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL,
+                                    nullptr);
+    }
+
     ULONG size = 1u << 20;
     std::vector<BYTE> buffer(size);
     ULONG required = 0;
@@ -747,11 +810,20 @@ ForceUnlockResult ForceUnlockHandles(const std::wstring& target) {
         buffer.resize(size);
     }
     if (status < 0) {
+        if (fileTypeProbe != INVALID_HANDLE_VALUE) {
+            CloseHandle(fileTypeProbe);
+        }
         return result;
     }
 
     const auto* info = reinterpret_cast<const SYSTEM_HANDLE_INFORMATION_EX_LOCAL*>(buffer.data());
-    const USHORT fileObjectTypeIndex = DetectFileObjectTypeIndex(info);
+    const ULONG_PTR probeValue = fileTypeProbe != INVALID_HANDLE_VALUE
+        ? reinterpret_cast<ULONG_PTR>(fileTypeProbe)
+        : 0;
+    const USHORT fileObjectTypeIndex = DetectFileObjectTypeIndex(info, probeValue);
+    if (fileTypeProbe != INVALID_HANDLE_VALUE) {
+        CloseHandle(fileTypeProbe);
+    }
 
     std::unordered_map<DWORD, HANDLE> processHandles;
     std::unordered_set<DWORD> inaccessiblePids;
@@ -785,7 +857,8 @@ ForceUnlockResult ForceUnlockHandles(const std::wstring& target) {
         auto processIt = processHandles.find(pid);
         if (processIt == processHandles.end()) {
             process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid);
-            if (!process && GetLastError() == ERROR_ACCESS_DENIED) {
+            if (!process && GetLastError() == ERROR_ACCESS_DENIED &&
+                fileObjectTypeIndex != 0) {
                 inaccessiblePids.insert(pid);
             }
             processHandles.emplace(pid, process);
@@ -861,6 +934,11 @@ ScanResult ScanLocks(const std::wstring& target) {
         return result;
     }
 
+    ProbeDeleteSharing(target,
+                       result.targetIsDirectory,
+                       result.deleteShareProbeSucceeded,
+                       result.deleteShareProbeError);
+
     std::unordered_map<DWORD, LockProcess> processMap;
     result.restartManagerError = ScanRestartManager(target, processMap);
 
@@ -886,6 +964,7 @@ ScanResult ScanLocks(const std::wstring& target) {
                           result.targetIsDirectory,
                           result.inaccessibleProcessCount,
                           result.inspectedDiskHandleCount,
+                          result.handleTypeFilterAvailable,
                           processMap);
     }
 

@@ -37,3 +37,12 @@ jobs:
             throw "dist/GeniaUnlocker.exe was not produced."
           }
           Get-Item "dist/GeniaUnlocker.exe" | Format-List FullName,Length,LastWriteTime
+
+      - name: Upload portable artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeniaUnlocker-${{ github.ref_name }}-x64
+          path: dist/GeniaUnlocker.exe
+          if-no-files-found: error
+          retention-days: 14
