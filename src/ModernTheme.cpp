@@ -48,18 +48,18 @@ Palette QueryPalette() {
         p.surfacePressed = RGB(43, 44, 49);
         p.border = RGB(53, 54, 60);
         p.text = RGB(241, 241, 243);
-        p.muted = RGB(155, 156, 163);
+        p.muted = RGB(170, 171, 177);
         p.accent = Blend(systemAccent, RGB(255, 255, 255), 8);
         p.accentPressed = Blend(p.accent, RGB(0, 0, 0), 16);
         p.danger = RGB(220, 74, 78);
         p.dangerPressed = RGB(184, 57, 61);
     } else {
-        p.window = RGB(249, 250, 252);
+        p.window = RGB(246, 247, 249);
         p.surface = RGB(255, 255, 255);
-        p.surfacePressed = RGB(239, 241, 245);
-        p.border = RGB(224, 226, 231);
+        p.surfacePressed = RGB(236, 239, 243);
+        p.border = RGB(216, 219, 225);
         p.text = RGB(27, 28, 31);
-        p.muted = RGB(105, 107, 113);
+        p.muted = RGB(92, 95, 102);
         p.accent = systemAccent;
         p.accentPressed = Blend(systemAccent, RGB(0, 0, 0), 16);
         p.danger = RGB(196, 52, 56);
@@ -87,6 +87,19 @@ void ApplyWindowChrome(HWND hwnd, bool dark) {
     constexpr int kNoSystemBackdrop = 1; // DWMSBT_NONE
     int backdrop = kNoSystemBackdrop;
     DwmSetWindowAttribute(hwnd, kSystemBackdropType, &backdrop, sizeof(backdrop));
+
+    // Keep the native main-window caption on the same visual plane as the
+    // client area. This removes the separate grey strip visible in Flat UX.
+    const Palette palette = QueryPalette();
+    constexpr DWORD kBorderColor = 34;  // DWMWA_BORDER_COLOR
+    constexpr DWORD kCaptionColor = 35; // DWMWA_CAPTION_COLOR
+    constexpr DWORD kTextColor = 36;    // DWMWA_TEXT_COLOR
+    COLORREF borderColor = palette.border;
+    COLORREF captionColor = palette.window;
+    COLORREF textColor = palette.text;
+    DwmSetWindowAttribute(hwnd, kBorderColor, &borderColor, sizeof(borderColor));
+    DwmSetWindowAttribute(hwnd, kCaptionColor, &captionColor, sizeof(captionColor));
+    DwmSetWindowAttribute(hwnd, kTextColor, &textColor, sizeof(textColor));
 }
 
 void ApplyControlTheme(HWND hwnd, bool dark) {
@@ -132,14 +145,17 @@ void DrawButton(const DRAWITEMSTRUCT& draw, const Palette& palette, ButtonKind k
 
     case ButtonKind::Secondary:
     default:
-        fill = pressed ? palette.surfacePressed : (hot ? palette.surface : palette.window);
+        // Secondary controls should still be visible in the light theme.
+        // A quiet surface fill gives them shape without returning to raised UX.
+        fill = pressed ? palette.surfacePressed
+                       : (hot ? palette.surfacePressed : palette.surface);
         break;
     }
 
     if (disabled) {
         fill = palette.window;
-        border = Blend(palette.border, palette.window, 42);
-        text = palette.muted;
+        border = Blend(palette.border, palette.window, 30);
+        text = Blend(palette.muted, palette.text, 18);
     }
 
     HBRUSH background = CreateSolidBrush(palette.window);
